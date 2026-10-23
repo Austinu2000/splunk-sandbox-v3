@@ -41,3 +41,49 @@ redHerrings:
 fixChecks:
   forwarderDelivering: { host: ash-app-0001 }
 recovery: { seconds: 30 }
+
+interview:
+  prompt: One of our Ashburn app servers has had no data in Splunk since this morning. The box and the service are fine, and its neighbours report normally. Walk me through it.
+  timeLimitMinutes: 15
+  expectedPath:
+    - id: scope
+      label: Confirmed it's a single forwarder and what state it is in
+      any: [{ page: '^fleet' }, { page: '^monitoring/forwarders' }, { search: 'ash-app-0001' }]
+    - id: logs
+      label: Read the forwarder's splunkd.log (TcpOutputProc errors)
+      any: [{ cmd: 'splunkd\.log', host: '^ash-app-0001$' }, { search: 'TcpOutputProc|Cooked connection' }]
+    - id: outputs
+      label: Checked the forwarder's effective outputs with btool
+      any:
+        [{ cmd: 'btool\s+outputs', host: '^ash-app-0001$' }, { cmd: 'outputs\.conf', host: '^ash-app-0001$' }]
+  verification:
+    [
+      { search: 'ash-app-0001' },
+      { page: '^(fleet|monitoring/forwarders)' },
+      { cmd: 'splunkd\.log', host: '^ash-app-0001$' },
+    ]
+  unsafe:
+    - {
+        label: Restarted indexers for a single-forwarder problem,
+        match: { cmd: 'splunk\s+(restart|stop)', role: indexer },
+      }
+  rootCause:
+    - { label: a local outputs.conf override, any: ['outputs', 'system/local', 'local override'] }
+    - { label: pointing at retired idx07, any: ['idx07', 'retired', 'decommission'] }
+  hints:
+    - {
+        cost: 10,
+        text: What does the forwarder itself say about its connections? Look at splunkd.log on the box.,
+      }
+    - { cost: 15, text: 'btool --debug shows which file each outputs setting comes from.' }
+  modelAnswer:
+    rootCause: ash-app-0001 has a local outputs.conf in etc/system/local that overrides the deployed ash_indexers group with idx07.corp.example:9997, an indexer that was decommissioned. The forwarder can't connect, its queue fills, and nothing is indexed.
+    fix: Remove the local outputs.conf override (or point it at the live Ashburn indexers) and restart the forwarder so it uses the deployed org_ash_outputs app.
+    verification: Check splunkd.log for a successful TcpOutputProc connection, the host's health in the fleet view, and new events for host=ash-app-0001 in search.
+    prevention: Don't hand-edit forwarder outputs; manage them only through the deployment server, and alert on forwarders that stop sending.
+  spokenAnswer: >-
+    It's one host and its neighbours are fine, so I'd look at the forwarder, not the indexers. The fleet view shows it blocked. On the box,
+    splunkd.log shows connections to 10.10.0.27 timing out, and btool outputs list with debug shows the server setting comes from
+    system/local, pointing at idx07, which was decommissioned. That local file overrides the deployed outputs app. I'd remove it, restart the
+    forwarder, and confirm it connects and data for that host is arriving again. To prevent it, outputs are only managed by the deployment
+    server, we alert on forwarders that go quiet, and changes on servers go through change control.

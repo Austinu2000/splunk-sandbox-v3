@@ -1,3 +1,5 @@
+import type { ActionDto } from '@sandbox/shared';
+import type { InterviewRecord } from './interview/engine';
 import type { WorldInfo } from '@sandbox/shared';
 import { defaultWorldConfig, validateConfig, type WorldConfig } from './config';
 import { FleetAggregates } from './fleet/aggregates';
@@ -37,6 +39,9 @@ export interface World {
   /** Fleet behaviour derived from running config (deployment server mappings, output reachability). */
   derived: DerivedState;
   scenarios: ScenarioState;
+  /** Everything the user did (commands, searches, pages, hints), in order. */
+  actions: ActionDto[];
+  interviews: InterviewRecord[];
 }
 
 /** Per-host state created by user activity. Generated content is never stored, only changes to it. */
@@ -77,6 +82,8 @@ export function createWorld(overrides: Partial<WorldConfig> = {}): World {
       revisions: new Map(),
     },
     scenarios: { definitions: [], tickets: [], injected: [] },
+    actions: [],
+    interviews: [],
     derived: null as unknown as DerivedState,
   };
   generateFleet(world);

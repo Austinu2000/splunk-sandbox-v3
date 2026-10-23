@@ -171,3 +171,51 @@ redHerrings:
 fixChecks:
   scheduler: { host: sh01, maxSkipped: 0, minutes: 60 }
 recovery: { seconds: 60 }
+
+interview:
+  prompt: Security says their new correlation searches on our main search head mostly never fire, and some older alerts have gone quiet too. They run fine by hand. What's happening?
+  timeLimitMinutes: 25
+  expectedPath:
+    - id: scope
+      label: Looked at scheduler activity (Monitoring Console or scheduler.log)
+      any: [{ page: '^monitoring/scheduler' }, { search: 'sourcetype=scheduler|scheduler\.log' }]
+    - id: reason
+      label: Found the skip reason
+      any: [{ search: 'skipped|reason' }, { cmd: 'scheduler\.log', host: '^sh01$' }]
+    - id: config
+      label: Checked the schedules and the scheduler limit with btool
+      any:
+        [
+          { cmd: 'btool\s+(savedsearches|limits)', host: '^sh01$' },
+          { cmd: '(savedsearches|limits)\.conf', host: '^sh01$' },
+        ]
+  verification: [{ page: '^monitoring/scheduler' }, { search: 'scheduler' }]
+  unsafe:
+    - {
+        label: Restarted indexers for a search-head problem,
+        match: { cmd: 'splunk\s+(restart|stop)', role: indexer },
+      }
+  rootCause:
+    - {
+        label: all scheduled at the same minute,
+        any: ['cron', 'same (time|minute)', 'top of the hour', '0 \* \* \* \*', 'stagger'],
+      }
+    - { label: the scheduler concurrency limit, any: ['concurren', 'limit', 'max_searches'] }
+    - { label: searches are skipped, any: ['skip'] }
+  hints:
+    - {
+        cost: 10,
+        text: 'index=_internal sourcetype=scheduler status=skipped tells you why a run was skipped.',
+      }
+    - { cost: 15, text: Look at when the new searches are scheduled and how long a 24-hour search takes. }
+  modelAnswer:
+    rootCause: Twelve new "Security - ..." searches on sh01 all run on cron 0 * * * * over the last 24 hours, with no schedule_window. At the top of each hour they exceed sh01's historical scheduler limit (9, with max_searches_perc = 25), so most are skipped, along with existing searches due then.
+    fix: Stagger the cron schedules across the hour (and/or add schedule_window = auto so runs can wait), shorten the time ranges where possible, then restart sh01. Raising max_searches_perc is a last resort that adds load.
+    verification: Watch the Monitoring Console scheduler view, or index=_internal sourcetype=scheduler status=skipped, show no new skips over the next hours.
+    prevention: Review new scheduled searches for schedule and cost, use schedule windows and priorities, and alert on the skip ratio.
+  spokenAnswer: >-
+    If searches work by hand but don't fire on schedule, I'd look at the scheduler. The scheduler log shows status skipped with the reason
+    that the concurrency limit was reached, and the skips cluster at the top of the hour. btool savedsearches shows the twelve new security
+    searches all on cron zero, star, star, star, star, over 24 hours, and limits gives sh01 a limit of nine. They pile up together and push
+    everything else out. I'd stagger them across the hour and add a schedule window, restart, and watch the skip count drop to zero. Going
+    forward, new scheduled searches get a review for timing and cost, and we alert on the skip ratio.

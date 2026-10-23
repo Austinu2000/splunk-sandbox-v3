@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { PageDto, ResultValue, SearchEventDto, SearchJobDto } from '@sandbox/shared';
-import { eventToPlain, rowToPlain, runSearch, type SearchOutcome, type World } from '@sandbox/sim';
+import { eventToPlain, logAction, rowToPlain, runSearch, type SearchOutcome, type World } from '@sandbox/sim';
 
 const MAX_JOBS = 20;
 
@@ -61,6 +61,12 @@ export function registerSearch(app: FastifyInstance, world: World): void {
       },
     },
     async (req) => {
+      const { search, earliest = '-15m', latest = 'now' } = req.body;
+      logAction(
+        world,
+        { kind: 'search', text: `${search} [earliest=${earliest} latest=${latest}]` },
+        Date.now(),
+      );
       const outcome = runSearch(world, req.body);
       const sid = `${Math.floor(world.clock.now / 1000)}.${++seq}`;
       jobs.set(sid, outcome);

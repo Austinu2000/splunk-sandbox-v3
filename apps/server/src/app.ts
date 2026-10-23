@@ -11,7 +11,9 @@ import {
   worldInfo,
   type World,
 } from '@sandbox/sim';
+import { aiGradingEnabled, createAiGrader, type AiGrader } from './aiGrader';
 import { registerConsoles } from './consoles';
+import { registerInterview } from './interview';
 import { registerSearch } from './search';
 import { registerTerminal } from './terminal';
 
@@ -37,12 +39,23 @@ export interface SandboxApp {
   onTick(): void;
 }
 
-export function buildApp(world: World, opts: { logger?: boolean } = {}): SandboxApp {
+export interface AppOptions {
+  logger?: boolean;
+  /** Claude grading for interviews; defaults to on only when ANTHROPIC_API_KEY is set. */
+  aiGrader?: AiGrader | null;
+}
+
+export function buildApp(world: World, opts: AppOptions = {}): SandboxApp {
   const app = Fastify({ logger: opts.logger ?? false });
   const terminals = registerTerminal(app, world);
   registerSearch(app, world);
   registerScenarios(app, world);
   registerConsoles(app, world);
+  registerInterview(
+    app,
+    world,
+    opts.aiGrader !== undefined ? opts.aiGrader : aiGradingEnabled() ? createAiGrader() : null,
+  );
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
     if (err instanceof ScenarioError || err instanceof FilterError || err.validation)

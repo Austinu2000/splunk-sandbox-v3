@@ -187,6 +187,8 @@ export interface TicketDto {
   resolutionNote?: string;
   /** The incident's fix checks have failed at least once (the symptom really appeared). */
   symptomSeen?: boolean;
+  /** Set when an interview ended the ticket: whether the fix had held by then. */
+  outcome?: 'resolved' | 'unresolved';
 }
 
 // ---------------------------------------------------------------- Monitoring Console
@@ -262,4 +264,125 @@ export interface DsOverviewDto {
   unmatchedClients: number;
   serverClasses: DsServerClassDto[];
   apps: DsAppDto[];
+}
+
+// ---------------------------------------------------------------- Interview mode
+
+export type ActionKind = 'cmd' | 'search' | 'page' | 'hint' | 'submit';
+
+/** One thing the user did. Recorded for every session; interviews read the slice since they started. */
+export interface ActionDto {
+  seq: number;
+  kind: ActionKind;
+  /** Sim time, epoch ms. */
+  simTime: number;
+  /** Wall-clock time, epoch ms (the interview timer runs on wall time). */
+  wallTime: number;
+  /** cmd: the host the command ran on (for `ssh host cmd`, the target). */
+  host?: string;
+  user?: string;
+  /** The command line, SPL search, page id or hint text. */
+  text: string;
+}
+
+export interface InterviewOptionsDto {
+  scenarioId?: string;
+  topic?: string;
+  difficulty?: 'easy' | 'medium' | 'hard';
+  timeLimitMinutes?: number;
+}
+
+export interface InterviewAnswerDto {
+  rootCause: string;
+  fix: string;
+  verification: string;
+  prevention: string;
+}
+
+export const RUBRIC_DIMENSIONS = [
+  'triage',
+  'evidence',
+  'rootCause',
+  'fix',
+  'verification',
+  'safety',
+  'communication',
+] as const;
+export type RubricDimension = (typeof RUBRIC_DIMENSIONS)[number];
+
+export interface DimensionScoreDto {
+  dimension: RubricDimension;
+  label: string;
+  /** 0–100 within the dimension. */
+  score: number;
+  /** Points this dimension can contribute to the total. */
+  weight: number;
+  notes: string[];
+}
+
+/** The optional Claude assessment of the free-text answer, shown next to the offline score. */
+export interface AiAssessmentDto {
+  model: string;
+  rootCause: number;
+  communication: number;
+  feedback: string;
+}
+
+export interface TimelineEntryDto {
+  /** Seconds since the interview started (wall clock). */
+  at: number;
+  kind: ActionKind;
+  host?: string;
+  text: string;
+  /** Expected-path milestone ids this action satisfied (first time only). */
+  milestones: string[];
+  tags: ('change' | 'unsafe' | 'verification' | 'fixed')[];
+  note?: string;
+}
+
+export interface DebriefDto {
+  scores: DimensionScoreDto[];
+  hintPenalty: number;
+  total: number;
+  timeUsedSeconds: number;
+  overtime: boolean;
+  fixed: boolean;
+  timeline: TimelineEntryDto[];
+  missed: { id: string; label: string }[];
+  modelAnswer: InterviewAnswerDto;
+  spokenAnswer: string;
+  ai?: AiAssessmentDto;
+  aiError?: string;
+}
+
+export interface InterviewDto {
+  id: string;
+  scenarioId: string;
+  ticketId: string;
+  title: string;
+  topics: string[];
+  difficulty: 'easy' | 'medium' | 'hard';
+  prompt: string;
+  startedAt: number;
+  deadline: number;
+  timeLimitMinutes: number;
+  notes: string;
+  hintsAvailable: number;
+  hintsUsed: { text: string; cost: number }[];
+  status: 'running' | 'submitted';
+  submittedAt?: number;
+  answer?: InterviewAnswerDto;
+  debrief?: DebriefDto;
+}
+
+export interface InterviewCatalogDto {
+  topics: string[];
+  scenarios: {
+    id: string;
+    title: string;
+    topics: string[];
+    difficulty: 'easy' | 'medium' | 'hard';
+    seen: boolean;
+  }[];
+  aiGrading: boolean;
 }

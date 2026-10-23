@@ -1,4 +1,5 @@
 import { createWorld } from '@sandbox/sim';
+import { aiGradingEnabled, AI_MODEL } from './aiGrader';
 import { buildApp } from './app';
 import { SimTicker } from './ticker';
 
@@ -17,6 +18,11 @@ await app.listen({ host: HOST, port: PORT });
 ticker.start();
 app.log.info(
   `World "${seed}" with ${world.fleet.size} forwarders ready in ${Math.round(performance.now() - started)} ms`,
+);
+app.log.info(
+  aiGradingEnabled()
+    ? `Interview answers will also be graded by Claude (${AI_MODEL}); unset ANTHROPIC_API_KEY to stay offline`
+    : 'Claude grading is off (set ANTHROPIC_API_KEY to enable); interviews are graded offline',
 );
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

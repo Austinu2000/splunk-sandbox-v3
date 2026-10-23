@@ -44,3 +44,49 @@ redHerrings:
 fixChecks:
   license: { maxProjectedPct: 90 }
 recovery: { seconds: 60 }
+
+interview:
+  prompt: Finance forwarded an alert saying we're on track to blow through our daily license today. Nothing was supposedly changed. How would you find what's eating the license and stop it?
+  timeLimitMinutes: 20
+  expectedPath:
+    - id: usage
+      label: Looked at license usage (Monitoring Console or license_usage.log)
+      any: [{ page: '^monitoring/license' }, { search: 'license_usage' }]
+    - id: source
+      label: Identified the sourcetype or file driving the growth
+      any:
+        [{ search: 'app:debug|debug\.log' }, { search: 'license_usage.*\b(st|by)\b' }, { cmd: 'debug\.log' }]
+    - id: config
+      label: Found the input that collects it (deployment apps on ds01 or the forwarder's btool)
+      any: [{ cmd: 'inputs', host: '^ds01$' }, { page: '^forwarders/apps' }, { cmd: 'btool\s+inputs' }]
+  verification: [{ page: '^monitoring/license' }, { search: 'license_usage|app:debug' }]
+  unsafe:
+    - { label: Restarted indexers by hand, match: { cmd: 'splunk\s+(restart|stop)', role: indexer } }
+  rootCause:
+    - { label: the application debug log (app:debug), any: ['debug\.log', 'app:debug', 'debug log'] }
+    - { label: a new monitor input, any: ['inputs', 'monitor'] }
+    - {
+        label: in org_linux_app_inputs on the deployment server,
+        any: ['org_linux_app_inputs', 'deployment server', 'ds01'],
+      }
+  hints:
+    - {
+        cost: 10,
+        text: 'license_usage.log on the license manager records bytes by index (idx) and sourcetype (st).',
+      }
+    - {
+        cost: 15,
+        text: 'Once you know the sourcetype, find which inputs stanza collects it and where that stanza comes from.',
+      }
+  modelAnswer:
+    rootCause: A [monitor:///var/log/app/debug.log] stanza (sourcetype app:debug) was added to org_linux_app_inputs/local/inputs.conf on ds01 and deployed. Every linux_app forwarder now ships its DEBUG request dumps, pushing projected daily usage well past the quota.
+    fix: Disable or remove that stanza on ds01 and run splunk reload deploy-server so the forwarders stop collecting it. Alternatively, drop app:debug to nullQueue on the indexers through the cluster bundle.
+    verification: Watch the projected daily usage in the Monitoring Console fall back under the quota, and confirm license_usage.log shows no new st=app:debug bytes.
+    prevention: Review deployment-app changes, alert on projected license usage and on new sourcetypes, and keep debug logging out of production inputs.
+  spokenAnswer: >-
+    First I'd quantify it: the license view shows projected usage around 140 percent, so this started today. Splitting license_usage.log by
+    sourcetype, a new one, app:debug, is the biggest consumer. That's the application debug log, which our inputs normally blacklist. A
+    forwarder's btool inputs list shows a monitor stanza for debug.log coming from org_linux_app_inputs, and on ds01 it's in the app's local
+    inputs.conf. I'd disable that stanza and reload the deployment server, or drop app:debug to nullQueue if we must act at the indexers. Then
+    I'd watch projected usage come back under quota. To prevent repeats, deployment-app changes get reviewed and we alert on new sourcetypes
+    and projected license usage.

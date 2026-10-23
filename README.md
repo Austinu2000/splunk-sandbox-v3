@@ -6,7 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 
-**Status:** milestone 6 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, an incident engine with eight solution-tested incidents, the Monitoring Console and Forwarder Management.
+**Status:** milestone 7 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, an incident engine with eight solution-tested incidents, the Monitoring Console, Forwarder Management, and interview mode with a timer, action log, rubric grader and debrief.
 
 ## Requirements
 
@@ -254,6 +254,54 @@ Each panel runs an SPL search on the server over the same data as Search & Repor
 - `splunk show cluster-bundle-status` compares each peer's active bundle checksum with the manager's.
 - idx07 is a decommissioned indexer. Its OS and service account remain, but Splunk is uninstalled.
 
+## Interview mode (milestone 7)
+
+Open **Interview**. Pick a topic and difficulty, choose a specific incident, or let the app pick one you haven't seen. You can also change the time limit. Then:
+1. A prompt appears, phrased the way an interviewer would ask it, and a **wall-clock** timer starts. A strip under the menu keeps the prompt and the time left visible on every page. The sandbox keeps running on sim time.
+2. Investigate anywhere in the sandbox. Use the notes box to think out loud. **Hints** cost points.
+3. Fix the incident and submit your root cause, fix, verification and prevention. Submitting ends the incident whether or not it is fixed.
+4. Read the score and debrief.
+
+**Action log.** Every command (with its host and user), every search (with its time range) and every page you open is recorded with sim time and wall time. `ssh host command` is attributed to the target host. Interview mode allows one incident at a time, so close any open sandbox tickets first.
+
+**Rubric (100 points).** The grader is deterministic and runs offline:
+
+| Dimension | Points | How it's measured |
+|---|---|---|
+| Triage | 15 | Met a milestone of the expected path before the first change (edit, restart, reload, chmod, rm…) |
+| Evidence | 20 | Share of the expected-path milestones met, in any order |
+| Root cause | 20 | Concepts named in the written root cause and fix (each concept has alternative phrasings) |
+| Fix | 20 | The incident's fix checks pass at submission (100 once the recovery period held, 85 while still recovering) |
+| Verification | 10 | A matching search or command after the fix took effect (30 for only describing one) |
+| Safety | 10 | Minus 50 per risky move: generic ones (`splunk clean`, deleting index data or config directories, `kill -9`) plus the incident's own (for example restarting unrelated indexers) |
+| Communication | 5 | All four parts answered, 30–300 words, names the hosts, components or files involved |
+
+Hint costs are subtracted from the total.
+
+**Debrief:**
+- the score per dimension, with reasons;
+- a timeline of what you did, marking the milestones met, the change that fixed it, verification and risky moves;
+- the checks you missed;
+- the model answer next to yours;
+- a 60-second spoken answer.
+
+**Optional Claude grading.** Off by default. If the server starts with `ANTHROPIC_API_KEY` set, the written answer is also sent to Claude (`claude-opus-5-5`, with Anthropic's default refusal fallback). Claude scores root cause and communication against the model answer and gives short feedback. The debrief shows that next to the offline score, which stays the total. If the call fails, the debrief says why and the offline score stands. Nothing else uses the network.
+
+**Scenario files** add an `interview` block:
+- `prompt` and `timeLimitMinutes`;
+- `expectedPath`: milestones, each met by any one `cmd`, `search` or `page` matcher (case-insensitive regexes, optionally limited by `host` or `role`);
+- `verification` and `unsafe` matchers;
+- `rootCause` concepts;
+- `hints` with point costs;
+- `modelAnswer` and `spokenAnswer`.
+
+All eight incidents have one. Grading tests are in `packages/sim/test/interview.test.ts`, including a perfect-score run that fixes the incident with the simulated `vi`.
+
+**Limits:**
+- Interviews, tickets and the action log are in memory until the server restarts. SQLite persistence, reset and save are milestone 8.
+- Each incident can be used once per server session.
+- Root-cause and communication scoring offline is keyword and heuristic matching. It can miss an unusual but correct phrasing; the Claude assessment is there for that.
+
 ## API
 
 ### Fleet (milestone 1)
@@ -296,3 +344,16 @@ Each panel runs an SPL search on the server over the same data as Search & Repor
 | GET | `/api/mc/:view` | `indexing`, `forwarders`, `license` or `scheduler`: stats plus panels (SPL, columns, rows); cached per tick |
 | GET | `/api/ds/overview` | Server classes (patterns, apps, client counts), deployment apps, unmatched clients |
 | GET | `/api/ds/clients` | `offset`, `limit` (≤500), `q`, `serverClass`, `unmatched` |
+
+### Interview (milestone 7)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/interview/catalog` | Topics, interview incidents (symptom title, difficulty, seen) and whether Claude grading is on |
+| POST | `/api/interviews` | `{ scenarioId?, topic?, difficulty?, timeLimitMinutes? }` (5–120); starts the incident and the timer |
+| GET | `/api/interviews/current` | The running interview, or `null` |
+| GET | `/api/interviews` | All interviews, newest first, with debriefs once submitted |
+| POST | `/api/interviews/:id/hint` | Reveal the next hint (costs points) |
+| PUT | `/api/interviews/:id/notes` | `{ notes }` (≤20,000 characters) |
+| POST | `/api/interviews/:id/submit` | `{ answer: { rootCause, fix, verification, prevention } }`; returns the debrief |
+| POST | `/api/actions/page` | `{ page }`: records a page view in the action log (the web app sends these) |

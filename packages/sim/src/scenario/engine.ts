@@ -136,6 +136,58 @@ const redHerring = z
   .strict();
 export type RedHerring = z.infer<typeof redHerring>;
 
+/** Something the user did: a command (optionally on a host or role), a search, or a page view. Regexes, case-insensitive. */
+const matcher = z
+  .object({
+    cmd: z.string().optional(),
+    search: z.string().optional(),
+    page: z.string().optional(),
+    host: z.string().optional(),
+    role: z.string().optional(),
+  })
+  .strict()
+  .refine(
+    (m) => [m.cmd, m.search, m.page].filter(Boolean).length === 1,
+    'Give exactly one of cmd, search or page',
+  );
+export type ActionMatcher = z.infer<typeof matcher>;
+
+const answerText = z.object({
+  rootCause: z.string().min(1),
+  fix: z.string().min(1),
+  verification: z.string().min(1),
+  prevention: z.string().min(1),
+});
+
+/** Interview mode: how an interviewer would pose the incident, and what a strong answer shows. */
+const interview = z
+  .object({
+    prompt: z.string().min(1),
+    timeLimitMinutes: z.number().int().min(5).max(120).default(20),
+    /** Evidence milestones, in any order: each is met by any one of its matchers. */
+    expectedPath: z
+      .array(
+        z
+          .object({ id: z.string().regex(/^[a-z0-9-]+$/), label: z.string(), any: z.array(matcher).min(1) })
+          .strict(),
+      )
+      .min(1),
+    /** Actions that confirm recovery with data, once the fix is in. */
+    verification: z.array(matcher).min(1),
+    /** Risky moves for this incident, on top of the engine's generic list. */
+    unsafe: z.array(z.object({ label: z.string(), match: matcher }).strict()).default([]),
+    /** Concepts a correct root cause names; each is met by any of its regexes. */
+    rootCause: z.array(z.object({ label: z.string(), any: z.array(z.string()).min(1) }).strict()).min(1),
+    hints: z
+      .array(z.object({ cost: z.number().int().min(1).max(30), text: z.string() }).strict())
+      .default([]),
+    modelAnswer: answerText.strict(),
+    /** About 60 seconds spoken. */
+    spokenAnswer: z.string().min(1),
+  })
+  .strict();
+export type InterviewSpec = z.infer<typeof interview>;
+
 const schema = z
   .object({
     id: z.string().regex(/^[a-z0-9-]+$/),
@@ -166,6 +218,7 @@ const schema = z
     redHerrings: z.array(redHerring).default([]),
     fixChecks: check,
     recovery: z.object({ seconds: z.number().nonnegative().max(3600) }).strict(),
+    interview: interview.optional(),
   })
   .strict();
 export type Scenario = z.infer<typeof schema>;
@@ -261,6 +314,22 @@ export function configureScenarios(world: World, definitions: Scenario[]): void 
         throw new ScenarioError(`Missing config directory: ${c.path}`);
       if (fs.findNode(c.path)?.type === 'dir')
         throw new ScenarioError(`Config path is a directory: ${c.path}`);
+    }
+    if (s.interview) {
+      const i = s.interview;
+      const patterns = [
+        ...i.expectedPath.flatMap((m) => m.any),
+        ...i.verification,
+        ...i.unsafe.map((u) => u.match),
+      ].flatMap((m) => [m.cmd, m.search, m.page, m.host, m.role]);
+      patterns.push(...i.rootCause.flatMap((c) => c.any));
+      for (const re of patterns)
+        if (re !== undefined)
+          try {
+            new RegExp(re, 'i');
+          } catch {
+            throw new ScenarioError(`Invalid interview pattern in ${s.id}: ${re}`);
+          }
     }
     for (const r of s.redHerrings) {
       const p = resolveHost(world, r.host);
@@ -439,6 +508,19 @@ export function closeTicket(world: World, id: string, note: string): TicketDto {
   t.resolutionNote = note.trim();
   return t;
 }
+/** Interview submission ends the incident whether or not it was fixed; the outcome is recorded. */
+export function endTicket(world: World, id: string, note: string): TicketDto {
+  refreshTickets(world);
+  const t = world.scenarios.tickets.find((t) => t.id === id);
+  if (!t) throw new ScenarioError('Unknown ticket');
+  if (t.status === 'closed') return t;
+  t.outcome = t.status === 'resolved' ? 'resolved' : 'unresolved';
+  t.status = 'closed';
+  t.closedAt = world.clock.now;
+  t.resolutionNote = note.trim().slice(0, 4000);
+  return t;
+}
+
 export function scenarioCatalog(world: World): ScenarioDto[] {
   // Only the symptom-level fields: the summary, changes and fix checks would give the answer away.
   return world.scenarios.definitions.map(({ id, title, topics, difficulty }) => ({

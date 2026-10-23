@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
-import { TerminalSession, type World } from '@sandbox/sim';
+import { logAction, TerminalSession, type World } from '@sandbox/sim';
 
 const MAX_SESSIONS = 8;
 const MAX_MESSAGE = 64 * 1024;
@@ -44,6 +44,8 @@ export function registerTerminal(app: FastifyInstance, world: World): { tickAll(
           const t = setTimeout(fn, ms);
           return () => clearTimeout(t);
         },
+        onCommand: (e) =>
+          logAction(world, { kind: 'cmd', host: e.host, user: e.user, text: e.line }, Date.now()),
       });
       sessions.add(session);
 

@@ -40,3 +40,14 @@ export {
 } from './scenario/engine';
 export { monitoringConsole } from './consoles/monitoring';
 export { dsClients, dsOverview, type DsClientQuery } from './ds/manage';
+export {
+  grade,
+  interviewCatalog,
+  interviewDto,
+  logAction,
+  saveNotes,
+  startInterview,
+  submitInterview,
+  takeHint,
+  type InterviewRecord,
+} from './interview/engine';

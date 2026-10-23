@@ -1,4 +1,4 @@
-import { createWorld, stripAnsi, TerminalSession, type World } from '../src';
+import { createWorld, stripAnsi, TerminalSession, type SessionOptions, type World } from '../src';
 
 export interface TestTerm {
   world: World;
@@ -14,11 +14,13 @@ export interface TestTerm {
 export function testTerm(
   world: World = createWorld({ seed: 'shell-test', fleetSize: 6_000 }),
   size = { cols: 120, rows: 30 },
+  onCommand?: SessionOptions['onCommand'],
 ): TestTerm {
   const timers: (() => void)[] = [];
   const session = new TerminalSession({
     world,
     ...size,
+    onCommand,
     schedule: (_ms, fn) => {
       timers.push(fn);
       return () => {

@@ -41,3 +41,55 @@ fixChecks:
     - parsingQueue: { host: idx01, blocked: false }
     - fleet: { site: dal, health: blocked_queue, maxPct: 2 }
 recovery: { seconds: 30 }
+
+interview:
+  prompt: Forwarders across one of our sites are reporting blocked output queues and indexing has slowed. Nobody touched the forwarders. Where do you start?
+  timeLimitMinutes: 20
+  expectedPath:
+    - id: scope
+      label: Scoped the problem to the Dallas site and its indexers
+      any: [{ page: '^fleet' }, { page: '^monitoring/(forwarders|indexing)' }, { search: 'blocked' }]
+    - id: queues
+      label: Looked at indexer queue metrics
+      any:
+        [
+          { search: 'group=queue|parsingqueue' },
+          { page: '^monitoring/indexing' },
+          { cmd: 'metrics\.log', host: '^idx' },
+        ]
+    - id: config
+      label: Checked idx01's queue configuration with btool or server.conf
+      any: [{ cmd: 'btool\s+server', host: '^idx01$' }, { cmd: 'server\.conf', host: '^idx01$' }]
+  verification:
+    [
+      { search: 'parsingqueue|blocked|group=queue' },
+      { page: '^monitoring/indexing' },
+      { page: '^fleet' },
+      { cmd: 'metrics\.log', host: '^idx01$' },
+    ]
+  unsafe:
+    - { label: Restarted healthy indexers, match: { cmd: 'splunk\s+(restart|stop)', host: '^idx0[2-6]$' } }
+  rootCause:
+    - { label: the parsing queue, any: ['parsing ?queue'] }
+    - { label: its maxSize was far too small, any: ['max ?size', '1 ?KB', 'too small', 'queue size'] }
+    - { label: on idx01, any: ['idx01'] }
+  hints:
+    - {
+        cost: 10,
+        text: Backpressure on forwarders usually starts at the receiver. Which indexers do the Dallas forwarders send to?,
+      }
+    - {
+        cost: 15,
+        text: 'Search metrics.log on the Dallas indexers for group=queue and compare current_size_kb with max_size_kb.',
+      }
+  modelAnswer:
+    rootCause: "idx01's parsingQueue was set to maxSize = 1KB in system/local/server.conf. The queue saturates immediately, idx01 stops accepting data, and backpressure blocks every Dallas forwarder whose output group includes idx01."
+    fix: Set [queue=parsingQueue] maxSize back to a sensible value (the 6MB default or larger) on idx01 and restart splunkd on idx01 only.
+    verification: Confirm metrics.log on idx01 no longer shows name=parsingqueue blocked=true, the Monitoring Console queue fill drops, and the Dallas blocked-queue count in the fleet view returns to its background level.
+    prevention: Manage indexer server.conf through version control, and alert on blocked=true for indexer queues before forwarders back up.
+  spokenAnswer: >-
+    Forwarders reporting blocked output queues are usually a symptom of the receiver, so first I'd scope it: it's only Dallas, and Dallas
+    forwarders send to idx01 and idx02. On those indexers I'd check queue metrics in metrics.log or the Monitoring Console. idx01's parsing
+    queue is permanently blocked, and btool server list shows maxSize of 1KB in system/local. That tiny queue stops idx01 accepting data and the
+    pressure flows back to the forwarders. I'd restore a proper size, restart idx01 only, then confirm blocked=true disappears and the
+    Dallas blocked count drops. Going forward, indexer configs live in version control and we alert on blocked queues.

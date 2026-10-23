@@ -1,6 +1,10 @@
 import type {
   ClockSpeed,
   DsClientDto,
+  InterviewAnswerDto,
+  InterviewCatalogDto,
+  InterviewDto,
+  InterviewOptionsDto,
   DsOverviewDto,
   McView,
   McViewDto,
@@ -39,6 +43,16 @@ function query(params: Record<string, string | number | undefined>): string {
   return s ? `?${s}` : '';
 }
 
+function post<T>(url: string, body?: unknown): Promise<T> {
+  return request<T>(url, {
+    method: 'POST',
+    ...(body !== undefined && {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  });
+}
+
 export const api = {
   scenarios: () => request<ScenarioDto[]>('/api/scenarios'),
   tickets: () => request<TicketDto[]>('/api/tickets'),
@@ -51,6 +65,20 @@ export const api = {
       body: JSON.stringify({ note }),
     }),
   world: () => request<WorldInfo>('/api/world'),
+  logPage: (page: string) => post<{ ok: boolean }>('/api/actions/page', { page }),
+  interviewCatalog: () => request<InterviewCatalogDto>('/api/interview/catalog'),
+  interviews: () => request<InterviewDto[]>('/api/interviews'),
+  currentInterview: () => request<{ interview: InterviewDto | null; now: number }>('/api/interviews/current'),
+  startInterview: (opts: InterviewOptionsDto) => post<InterviewDto>('/api/interviews', opts),
+  interviewHint: (id: string) => post<InterviewDto>(`/api/interviews/${encodeURIComponent(id)}/hint`),
+  interviewNotes: (id: string, notes: string) =>
+    request<InterviewDto>(`/api/interviews/${encodeURIComponent(id)}/notes`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    }),
+  submitInterview: (id: string, answer: InterviewAnswerDto) =>
+    post<InterviewDto>(`/api/interviews/${encodeURIComponent(id)}/submit`, { answer }),
   monitoring: (view: McView) => request<McViewDto>(`/api/mc/${view}`),
   dsOverview: () => request<DsOverviewDto>('/api/ds/overview'),
   dsClients: (q: { offset: number; limit: number; q?: string; serverClass?: string; unmatched?: boolean }) =>

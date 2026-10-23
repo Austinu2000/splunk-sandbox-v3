@@ -9,6 +9,14 @@ import { usePoll } from './usePoll';
 import { MonitoringConsole, MC_TABS } from './pages/MonitoringConsole';
 import { ForwarderManagement, DS_TABS, type DsTab } from './pages/ForwarderManagement';
 import type { McView } from '@sandbox/shared';
+import { InterviewPage } from './pages/InterviewPage';
+import { InterviewBar } from './components/InterviewBar';
+
+/** The page id recorded in the action log: the route plus its sub-view, without query strings. */
+function pageId(hash: string): string {
+  const parts = hash.replace(/^#\/?/, '').split('?')[0]!.split('/').filter(Boolean);
+  return (parts.slice(0, 2).join('/') || 'fleet').toLowerCase().replace(/[^a-z0-9/-]/g, '');
+}
 
 /** The sub-view in #/route/<sub>, if it is one of `allowed`. */
 function subRoute<T extends string>(allowed: readonly T[], fallback: T): T {
@@ -21,6 +29,7 @@ function routeFromHash(): Route {
   if (h === '#/tickets') return 'tickets';
   if (h.startsWith('#/monitoring')) return 'monitoring';
   if (h.startsWith('#/forwarders')) return 'forwarders';
+  if (h.startsWith('#/interview')) return 'interview';
   if (h === '#/terminal') return 'terminal';
   if (h.startsWith('#/search')) return 'search';
   return 'fleet';
@@ -28,6 +37,7 @@ function routeFromHash(): Route {
 
 export function App() {
   const world = usePoll(() => api.world(), [], 2000);
+  const current = usePoll(() => api.currentInterview(), [], 2000);
   const [route, setRoute] = useState<Route>(routeFromHash);
   const [hash, setHash] = useState(window.location.hash);
   // The terminal mounts on first visit and then stays mounted, so its session survives navigation.
@@ -38,7 +48,9 @@ export function App() {
     const onHash = () => {
       setRoute(routeFromHash());
       setHash(window.location.hash);
+      void api.logPage(pageId(window.location.hash)).catch(() => undefined);
     };
+    void api.logPage(pageId(window.location.hash)).catch(() => undefined);
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -57,6 +69,9 @@ export function App() {
           await world.refresh();
         }}
       />
+      {current.data?.interview && (
+        <InterviewBar interview={current.data.interview} onInterviewPage={route === 'interview'} />
+      )}
       {world.error && !world.data && (
         <div className="error page-error">
           Cannot reach the sandbox server ({world.error}). Is <code>npm run dev</code> running?
@@ -71,6 +86,13 @@ export function App() {
             MC_TABS.map((t) => t.view),
             'indexing',
           )}
+        />
+      )}
+      {world.data && route === 'interview' && (
+        <InterviewPage
+          view={window.location.hash.split('/')[2]}
+          current={current.data?.interview ?? null}
+          onChange={() => void current.refresh()}
         />
       )}
       {world.data && route === 'forwarders' && (
