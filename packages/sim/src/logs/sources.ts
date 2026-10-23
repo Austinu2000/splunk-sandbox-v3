@@ -7,15 +7,39 @@ import { hashString, mix32, unit } from '../rng';
 import type { World } from '../world';
 import { isoTs, splunkTs, syslogTs } from './format';
 
+/** One log event: its time and raw text (multi-line for Windows events). */
+export type Entry = [time: number, raw: string];
+
 /**
- * A log file whose content is a pure function of the world and a time range.
- * The same generator answers `cat`, `tail -f` and, from milestone 4, searches.
+ * A log whose content is a pure function of the world and a time range. The same generator answers
+ * `cat`, `tail -f` and searches, so the terminal and search can never disagree.
  */
 export interface LogSource {
   /** How much history a full read of the file shows. */
   windowMs: number;
-  /** Lines with timestamps in (t0, t1], oldest first. */
+  /** Events with timestamps in (t0, t1], oldest first. */
+  entries(t0: number, t1: number): Entry[];
+  /** File view: the raw text of entries, split into lines. */
   lines(t0: number, t1: number): string[];
+  /**
+   * Search pushdown: for a lowercase search token, a bitmask of health states (1 << state) in which
+   * this source can produce it, or null if it can appear any time. Lets a fleet-wide search for
+   * "blocked" skip hosts that were never blocked, without changing the results.
+   */
+  gate?(token: string): number | null;
+}
+
+function source(
+  windowMs: number,
+  entries: (t0: number, t1: number) => Entry[],
+  gate?: LogSource['gate'],
+): LogSource {
+  return {
+    windowMs,
+    entries,
+    lines: (t0, t1) => entries(t0, t1).flatMap((e) => e[1].split('\n')),
+    gate,
+  };
 }
 
 /** Calls fn for every t = phase + k*period with t0 < t <= t1. */
@@ -30,12 +54,12 @@ function periodic(
   for (let t = phase + k * period; t <= t1; k++, t = phase + k * period) fn(t, k);
 }
 
-interface Timeline {
+export interface Timeline {
   stateAt(t: number): number;
   transitions: { time: number; from: number; to: number }[];
 }
 
-function hostTimeline(world: World, p: HostProfile, t0: number): Timeline {
+export function hostTimeline(world: World, p: HostProfile, t0: number): Timeline {
   if (p.fleetRow === undefined) {
     // Infrastructure nodes: up unless the user stopped splunkd; transitions come from service events.
     const events = (world.hosts.services.get(p.hostname)?.events ?? []).filter((e) => e.kind !== 'reload');
@@ -56,6 +80,15 @@ function hostTimeline(world: World, p: HostProfile, t0: number): Timeline {
   }
   return world.history.timeline(p.fleetRow, t0, world.fleet.health[p.fleetRow]!);
 }
+
+/** Bitmask of the states a host was in at any point in (t0, t1]. */
+export function statesIn(tl: Timeline, t0: number, t1: number): number {
+  let mask = 1 << tl.stateAt(t0);
+  for (const tr of tl.transitions) if (tr.time > t0 && tr.time <= t1) mask |= (1 << tr.from) | (1 << tr.to);
+  return mask;
+}
+
+const bit = (...states: number[]) => states.reduce((m, s) => m | (1 << s), 0);
 
 const tid = (p: HostProfile, salt: number) => 1000 + (mix32(p.hash, salt) % 60000);
 
@@ -78,10 +111,23 @@ function forwarderTarget(world: World, p: HostProfile) {
   return { cls, group: out.groups[0] ?? 'default-autolb-group', targets, live };
 }
 
-/** The server a healthy forwarder is connected to during period k (autoLB rotates every 30 s). */
+/** The server a healthy forwarder is connected to during 30 s period k (autoLB rotates). */
 function connected(f: ReturnType<typeof forwarderTarget>, p: HostProfile, k: number): Target | null {
   const pool = f.live.length ? f.live : f.targets.filter((t) => t.ip);
   return pool.length ? pool[(k + (p.hash & 1)) % pool.length]! : null;
+}
+
+/** For a forwarder: the indexer that receives its event at time t (the splunk_server field). */
+export function receivingIndexer(world: World, p: HostProfile): (t: number) => string | null {
+  if (p.fleetRow === undefined) return () => null;
+  const fwd = forwarderTarget(world, p);
+  return (t) => connected(fwd, p, Math.floor((t - (p.hash % 30_000)) / 30_000))?.name ?? null;
+}
+
+/** Time of the forwarder's last metrics.log batch at or before t (they come every 30 s). */
+export function lastMetricsTime(p: HostProfile, t: number): number {
+  const phase = mix32(p.hash, 0x33) % 30_000;
+  return Math.floor((t - phase) / 30_000) * 30_000 + phase;
 }
 
 function startupLines(world: World, p: HostProfile, t: number): string[] {
@@ -106,69 +152,88 @@ function shutdownLines(p: HostProfile, t: number): string[] {
   ];
 }
 
-/** Merges per-generator arrays of [time, line] and returns lines in time order. */
-function sorted(entries: [number, string][]): string[] {
-  return entries.sort((a, b) => a[0] - b[0]).map((e) => e[1]);
-}
+const byTime = (entries: Entry[]) => entries.sort((a, b) => a[0] - b[0]);
 
 const ms = (p: HostProfile, t: number, salt: number) => mix32(p.hash, Math.floor(t / 1000), salt) % 1000;
 
-export function splunkdLog(world: World, p: HostProfile): LogSource {
-  return {
-    windowMs: 6 * 3_600_000,
-    lines(t0, t1) {
-      const out: [number, string][] = [];
-      const tl = hostTimeline(world, p, t0);
-      const push = (t: number, line: string) => out.push([t, `${splunkTs(t)} ${line}`]);
+/** Words that only appear in a forwarder's splunkd.log while it is in particular states. */
+const FORWARDER_SPLUNKD_GATES: Record<string, number> = {
+  blocked: bit(BLOCKED),
+  blocked_seconds: bit(BLOCKED),
+  paused: bit(BLOCKED),
+  autoloadbalancedconnectionstrategy: bit(BLOCKED),
+  cooked: bit(BLOCKED),
+  resolve: bit(BLOCKED),
+  tailreader: bit(BLOCKED),
+  error: bit(BLOCKED),
+  warn: bit(BLOCKED, STALE),
+  httppubsubconnection: bit(STALE),
+  pubsubsvr: bit(STALE),
+  phonehome: bit(STALE),
+  not_connected: bit(STALE),
+  shutdownhandler: bit(OFFLINE),
+  shutting: bit(OFFLINE),
+  loader: bit(OFFLINE),
+  deployedapplication: bit(WRONG_CLASS),
+  installing: bit(WRONG_CLASS),
+  removing: bit(WRONG_CLASS),
+};
 
-      for (const tr of tl.transitions) {
-        if (tr.time <= t0 || tr.time > t1) continue;
-        if (tr.to === OFFLINE) shutdownLines(p, tr.time).forEach((l) => out.push([tr.time, l]));
-        if (tr.from === OFFLINE) startupLines(world, p, tr.time).forEach((l) => out.push([tr.time, l]));
-        if (tr.to === WRONG_CLASS && p.fleetRow !== undefined) {
-          const assignedIdx = world.fleet.assignedClass[p.fleetRow]!;
-          const thread = `${tid(p, 3)} HttpClientPollingThread_${p.splunk!.guid}`;
-          if (assignedIdx === NO_CLASS) {
-            const own =
-              CLASS_INPUTS[world.config.serverClasses[world.fleet.serverClass[p.fleetRow]!]!.id]!.app;
-            push(
-              tr.time + 2000,
-              `INFO  DeployedApplication [${thread}] - Removing app=${own} at='${p.splunk!.home}/etc/apps/${own}'`,
-            );
-            continue;
-          }
-          const assigned = world.config.serverClasses[assignedIdx]!;
-          const app = CLASS_INPUTS[assigned.id]!.app;
+export function splunkdLog(world: World, p: HostProfile): LogSource {
+  const entries = (t0: number, t1: number): Entry[] => {
+    const out: Entry[] = [];
+    const tl = hostTimeline(world, p, t0);
+    const push = (t: number, line: string) => out.push([t, `${splunkTs(t)} ${line}`]);
+
+    for (const tr of tl.transitions) {
+      if (tr.time <= t0 || tr.time > t1) continue;
+      if (tr.to === OFFLINE) shutdownLines(p, tr.time).forEach((l) => out.push([tr.time, l]));
+      if (tr.from === OFFLINE) startupLines(world, p, tr.time).forEach((l) => out.push([tr.time, l]));
+      if (tr.to === WRONG_CLASS && p.fleetRow !== undefined) {
+        const assignedIdx = world.fleet.assignedClass[p.fleetRow]!;
+        const thread = `${tid(p, 3)} HttpClientPollingThread_${p.splunk!.guid}`;
+        if (assignedIdx === NO_CLASS) {
+          const own = CLASS_INPUTS[world.config.serverClasses[world.fleet.serverClass[p.fleetRow]!]!.id]!.app;
           push(
             tr.time + 2000,
-            `INFO  DeployedApplication [${tid(p, 3)} HttpClientPollingThread_${p.splunk!.guid}] - Checksum mismatch 0 <> ${mix32(p.hash, tr.time) % 99999} for app=${app}. Will reload from='ds01.${DOMAIN}:8089/services/streams/deployment?name=default:${assigned.id}:${app}'`,
+            `INFO  DeployedApplication [${thread}] - Removing app=${own} at='${p.splunk!.home}/etc/apps/${own}'`,
           );
-          push(
-            tr.time + 2400,
-            `INFO  DeployedApplication [${tid(p, 3)} HttpClientPollingThread_${p.splunk!.guid}] - Installing app=${app} to='${p.splunk!.home}/etc/apps/${app}'`,
-          );
+          continue;
         }
-      }
-
-      for (const e of world.hosts.services.get(p.hostname)?.events ?? []) {
-        if (e.kind !== 'reload' || e.time <= t0 || e.time > t1) continue;
-        const thread = `${tid(p, 9)} TcpChannelThread`;
+        const assigned = world.config.serverClasses[assignedIdx]!;
+        const app = CLASS_INPUTS[assigned.id]!.app;
         push(
-          e.time,
-          `INFO  DeploymentServer [${thread}] - Reload requested (splunk reload deploy-server${e.detail ? ` -class ${e.detail}` : ''}); re-reading serverclass.conf and ${p.splunk!.home}/etc/deployment-apps`,
+          tr.time + 2000,
+          `INFO  DeployedApplication [${thread}] - Checksum mismatch 0 <> ${mix32(p.hash, tr.time) % 99999} for app=${app}. Will reload from='ds01.${DOMAIN}:8089/services/streams/deployment?name=default:${assigned.id}:${app}'`,
         );
-        for (const [cls, n] of Object.entries(e.matches ?? {}))
-          push(
-            e.time + 1,
-            `INFO  DeploymentServer [${thread}] - serverClass=${cls} matches ${n} client${n === 1 ? '' : 's'}`,
-          );
+        push(
+          tr.time + 2400,
+          `INFO  DeployedApplication [${thread}] - Installing app=${app} to='${p.splunk!.home}/etc/apps/${app}'`,
+        );
       }
+    }
 
-      if (p.fleetRow !== undefined) forwarderSplunkd(world, p, tl, t0, t1, push);
-      else enterpriseSplunkd(world, p, tl, t0, t1, push);
-      return sorted(out);
-    },
+    for (const e of world.hosts.services.get(p.hostname)?.events ?? []) {
+      if (e.kind !== 'reload' || e.time <= t0 || e.time > t1) continue;
+      const thread = `${tid(p, 9)} TcpChannelThread`;
+      push(
+        e.time,
+        `INFO  DeploymentServer [${thread}] - Reload requested (splunk reload deploy-server${e.detail ? ` -class ${e.detail}` : ''}); re-reading serverclass.conf and ${p.splunk!.home}/etc/deployment-apps`,
+      );
+      for (const [cls, n] of Object.entries(e.matches ?? {}))
+        push(
+          e.time + 1,
+          `INFO  DeploymentServer [${thread}] - serverClass=${cls} matches ${n} client${n === 1 ? '' : 's'}`,
+        );
+    }
+
+    if (p.fleetRow !== undefined) forwarderSplunkd(world, p, tl, t0, t1, push);
+    else enterpriseSplunkd(world, p, tl, t0, t1, push);
+    return byTime(out);
   };
+  const gate =
+    p.fleetRow === undefined ? undefined : (token: string) => FORWARDER_SPLUNKD_GATES[token] ?? null;
+  return source(6 * 3_600_000, entries, gate);
 }
 
 function forwarderSplunkd(
@@ -306,22 +371,29 @@ function enterpriseSplunkd(
 }
 
 export function metricsLog(world: World, p: HostProfile): LogSource {
-  return {
-    windowMs: 2 * 3_600_000,
-    lines(t0, t1) {
-      const out: string[] = [];
-      const tl = hostTimeline(world, p, t0);
-      const phase = mix32(p.hash, 0x33) % 30_000;
-      periodic(t0, t1, 30_000, phase, (t, k) => {
-        const state = tl.stateAt(t);
-        if (state === OFFLINE) return;
-        const pre = `${splunkTs(t)} INFO  Metrics - `;
-        if (p.fleetRow !== undefined) forwarderMetrics(world, p, t, k, state, (l) => out.push(pre + l));
-        else enterpriseMetrics(p, t, k, (l) => out.push(pre + l));
-      });
-      return out;
-    },
+  const entries = (t0: number, t1: number): Entry[] => {
+    const out: Entry[] = [];
+    const tl = hostTimeline(world, p, t0);
+    const phase = mix32(p.hash, 0x33) % 30_000;
+    const fwd = p.fleetRow !== undefined ? forwarderTarget(world, p) : null;
+    periodic(t0, t1, 30_000, phase, (t, k) => {
+      const state = tl.stateAt(t);
+      if (state === OFFLINE) return;
+      const pre = `${splunkTs(t)} INFO  Metrics - `;
+      const push = (l: string) => out.push([t, pre + l]);
+      if (fwd) forwarderMetrics(world, p, fwd, t, k, state, push);
+      else enterpriseMetrics(p, t, k, push);
+    });
+    return out;
   };
+  // Metrics lines are always INFO, and only blocked queues say "blocked".
+  const gate = (token: string) =>
+    token === 'warn' || token === 'error'
+      ? 0
+      : token === 'blocked' && p.fleetRow !== undefined
+        ? bit(BLOCKED)
+        : null;
+  return source(2 * 3_600_000, entries, gate);
 }
 
 function queueLine(name: string, maxKb: number, fill: number, blocked: boolean): string {
@@ -333,13 +405,13 @@ function queueLine(name: string, maxKb: number, fill: number, blocked: boolean):
 function forwarderMetrics(
   world: World,
   p: HostProfile,
+  fwd: ReturnType<typeof forwarderTarget>,
   t: number,
   k: number,
   state: number,
   push: (l: string) => void,
 ) {
   const row = p.fleetRow!;
-  const fwd = forwarderTarget(world, p);
   const { cls, group } = fwd;
   const blocked = state === BLOCKED;
   const kbps = throughputKBps(world, row, t, state);
@@ -393,125 +465,192 @@ function enterpriseMetrics(p: HostProfile, t: number, k: number, push: (l: strin
 /** /var/log/messages: cron, sessions, time sync. */
 export function messagesLog(world: World, p: HostProfile): LogSource {
   void world;
-  return {
-    windowMs: 24 * 3_600_000,
-    lines(t0, t1) {
-      const out: string[] = [];
-      periodic(t0, t1, 3_600_000, 61_000, (t) =>
-        out.push(
-          `${syslogTs(t)} ${p.hostname} CROND[${10000 + (mix32(p.hash, t) % 50000)}]: (root) CMD (run-parts /etc/cron.hourly)`,
-        ),
-      );
-      periodic(t0, t1, 60_000, p.hash % 60_000, (t, k) => {
-        const r = unit(p.hash, k, 0x61);
-        if (r < 0.03)
-          out.push(`${syslogTs(t)} ${p.hostname} chronyd[812]: Selected source 10.10.0.2 (ntp1.${DOMAIN})`);
-        else if (r < 0.06)
-          out.push(
-            `${syslogTs(t)} ${p.hostname} systemd[1]: Started Session ${1000 + (k % 9000)} of User root.`,
-          );
-        else if (r < 0.07) out.push(`${syslogTs(t)} ${p.hostname} systemd[1]: Starting dnf makecache...`);
-      });
-      return out.sort((a, b) => a.localeCompare(b));
-    },
-  };
+  return source(24 * 3_600_000, (t0, t1) => {
+    const out: Entry[] = [];
+    periodic(t0, t1, 3_600_000, 61_000, (t) =>
+      out.push([
+        t,
+        `${syslogTs(t)} ${p.hostname} CROND[${10000 + (mix32(p.hash, t) % 50000)}]: (root) CMD (run-parts /etc/cron.hourly)`,
+      ]),
+    );
+    periodic(t0, t1, 60_000, p.hash % 60_000, (t, k) => {
+      const r = unit(p.hash, k, 0x61);
+      if (r < 0.03)
+        out.push([
+          t,
+          `${syslogTs(t)} ${p.hostname} chronyd[812]: Selected source 10.10.0.2 (ntp1.${DOMAIN})`,
+        ]);
+      else if (r < 0.06)
+        out.push([
+          t,
+          `${syslogTs(t)} ${p.hostname} systemd[1]: Started Session ${1000 + (k % 9000)} of User root.`,
+        ]);
+      else if (r < 0.07) out.push([t, `${syslogTs(t)} ${p.hostname} systemd[1]: Starting dnf makecache...`]);
+    });
+    return byTime(out);
+  });
 }
 
 /** /var/log/secure: sshd noise from the bastion and the occasional scanner. */
 export function secureLog(world: World, p: HostProfile): LogSource {
   void world;
-  return {
-    windowMs: 24 * 3_600_000,
-    lines(t0, t1) {
-      const out: string[] = [];
-      periodic(t0, t1, 60_000, (p.hash >> 3) % 60_000, (t, k) => {
-        const r = unit(p.hash, k, 0x71);
-        const pid = 20000 + (mix32(p.hash, k) % 40000);
-        if (r < 0.02) {
-          out.push(
-            `${syslogTs(t)} ${p.hostname} sshd[${pid}]: Accepted publickey for splunk from 10.10.0.5 port ${40000 + (k % 20000)} ssh2: ED25519 SHA256:q1R0bVv8f0+5mKjv9ZtFv2rXl3c`,
-          );
-          out.push(
-            `${syslogTs(t)} ${p.hostname} sshd[${pid}]: pam_unix(sshd:session): session opened for user splunk(uid=1001) by (uid=0)`,
-          );
-        } else if (r < 0.03) {
-          out.push(
-            `${syslogTs(t)} ${p.hostname} sshd[${pid}]: Connection closed by authenticating user root 10.99.4.17 port ${50000 + (k % 9000)} [preauth]`,
-          );
-        }
-      });
-      return out;
-    },
-  };
+  return source(24 * 3_600_000, (t0, t1) => {
+    const out: Entry[] = [];
+    periodic(t0, t1, 60_000, (p.hash >> 3) % 60_000, (t, k) => {
+      const r = unit(p.hash, k, 0x71);
+      const pid = 20000 + (mix32(p.hash, k) % 40000);
+      if (r < 0.02) {
+        out.push([
+          t,
+          `${syslogTs(t)} ${p.hostname} sshd[${pid}]: Accepted publickey for splunk from 10.10.0.5 port ${40000 + (k % 20000)} ssh2: ED25519 SHA256:q1R0bVv8f0+5mKjv9ZtFv2rXl3c`,
+        ]);
+        out.push([
+          t,
+          `${syslogTs(t)} ${p.hostname} sshd[${pid}]: pam_unix(sshd:session): session opened for user splunk(uid=1001) by (uid=0)`,
+        ]);
+      } else if (r < 0.03) {
+        out.push([
+          t,
+          `${syslogTs(t)} ${p.hostname} sshd[${pid}]: Connection closed by authenticating user root 10.99.4.17 port ${50000 + (k % 9000)} [preauth]`,
+        ]);
+      }
+    });
+    return out;
+  });
 }
 
-/** Application log for the class's monitored input (app, nginx, mysql, syslog relay). */
+/** Application log for the class's monitored input (app, nginx, mysql, syslog relay): one event per 30 s. */
 export function appLog(world: World, p: HostProfile, classId: string): LogSource {
   void world;
   const salt = hashString(classId);
-  return {
-    windowMs: 2 * 3_600_000,
-    lines(t0, t1) {
-      const out: string[] = [];
-      periodic(t0, t1, 5_000, p.hash % 5_000, (t, k) => {
-        const r = unit(p.hash, k, salt);
-        const n = mix32(p.hash, k, salt);
-        const t2 = t + (n % 5000);
-        if (classId === 'linux_app') {
-          const level = r < 0.02 ? 'ERROR' : r < 0.08 ? 'WARN ' : 'INFO ';
-          const msg =
-            level === 'ERROR'
-              ? `c.example.orders.PaymentClient - Payment gateway timeout after 3000ms orderId=${n % 900000}`
-              : level === 'WARN '
-                ? `c.example.orders.InventoryCache - Cache miss ratio high: ${(0.3 + r).toFixed(2)}`
-                : `c.example.orders.OrderController - GET /api/orders/${n % 900000} 200 ${12 + (n % 80)}ms`;
-          out.push(`${isoTs(t2)} ${level} [http-nio-8080-exec-${1 + (n % 12)}] ${msg}`);
-        } else if (classId === 'linux_web') {
-          const status = r < 0.02 ? 502 : r < 0.06 ? 404 : 200;
-          out.push(
-            `10.${(n >> 8) & 255}.${n & 255}.${(n >> 16) & 255} - - [${new Date(t2).toUTCString()}] "GET /shop/item/${n % 5000} HTTP/1.1" ${status} ${200 + (n % 9000)} "-" "Mozilla/5.0"`,
-          );
-        } else if (classId === 'linux_db') {
-          if (r < 0.2)
-            out.push(
-              `${isoTs(t2)} ${n % 900} [Note] [MY-010914] [Server] Aborted connection ${n % 99999} to db: 'orders' user: 'app' host: '10.10.70.${n % 250}' (Got timeout reading communication packets).`,
-            );
-        } else {
-          out.push(
-            `${syslogTs(t2)} edge-fw01 %ASA-6-302013: Built inbound TCP connection ${n} for outside:203.0.113.${n % 250}/443 to inside:10.10.70.${(n >> 4) % 250}/${1024 + (n % 60000)}`,
-          );
-        }
-      });
-      return out;
-    },
-  };
+  return source(2 * 3_600_000, (t0, t1) => {
+    const out: Entry[] = [];
+    // Events are emitted at t + jitter; walk one extra period back so jittered events near t0 are kept.
+    periodic(t0 - 30_000, t1, 30_000, p.hash % 30_000, (t, k) => {
+      const r = unit(p.hash, k, salt);
+      const n = mix32(p.hash, k, salt);
+      const t2 = t + (n % 30_000);
+      if (t2 <= t0 || t2 > t1) return;
+      if (classId === 'linux_app') {
+        const level = r < 0.03 ? 'ERROR' : r < 0.1 ? 'WARN ' : 'INFO ';
+        const msg =
+          level === 'ERROR'
+            ? `c.example.orders.PaymentClient - Payment gateway timeout after 3000ms orderId=${n % 900000}`
+            : level === 'WARN '
+              ? `c.example.orders.InventoryCache - Cache miss ratio high: ${(0.3 + r).toFixed(2)}`
+              : `c.example.orders.OrderController - GET /api/orders/${n % 900000} 200 ${12 + (n % 80)}ms`;
+        out.push([t2, `${isoTs(t2)} ${level} [http-nio-8080-exec-${1 + (n % 12)}] ${msg}`]);
+      } else if (classId === 'linux_web') {
+        const status = r < 0.02 ? 502 : r < 0.06 ? 404 : 200;
+        out.push([
+          t2,
+          `10.${(n >> 8) & 255}.${n & 255}.${(n >> 16) & 255} - - [${accessTs(t2)}] "GET /shop/item/${n % 5000} HTTP/1.1" ${status} ${200 + (n % 9000)} "-" "Mozilla/5.0"`,
+        ]);
+      } else if (classId === 'linux_db') {
+        if (r < 0.3)
+          out.push([
+            t2,
+            `${isoTs(t2)} ${n % 900} [Note] [MY-010914] [Server] Aborted connection ${n % 99999} to db: 'orders' user: 'app' host: '10.10.70.${n % 250}' (Got timeout reading communication packets).`,
+          ]);
+      } else {
+        out.push([
+          t2,
+          `${syslogTs(t2)} edge-fw01 %ASA-6-302013: Built inbound TCP connection ${n} for outside:203.0.113.${n % 250}/443 to inside:10.10.70.${(n >> 4) % 250}/${1024 + (n % 60000)}`,
+        ]);
+      }
+    });
+    return byTime(out);
+  });
+}
+
+/** Apache/nginx access log time: 23/Oct/2026:08:00:21 +0000 */
+function accessTs(t: number): string {
+  const d = new Date(t);
+  const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][
+    d.getUTCMonth()
+  ];
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  return `${p2(d.getUTCDate())}/${M}/${d.getUTCFullYear()}:${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())} +0000`;
+}
+
+/** Windows Security/System events for Windows forwarders (multi-line, as WinEventLog renders them). */
+export function winEventLog(
+  world: World,
+  p: HostProfile,
+  logName: 'Security' | 'System' | 'Application' | 'Directory Service',
+): LogSource {
+  void world;
+  const salt = hashString(logName);
+  const period = logName === 'Security' ? 120_000 : 600_000;
+  return source(24 * 3_600_000, (t0, t1) => {
+    const out: Entry[] = [];
+    periodic(t0, t1, period, mix32(p.hash, salt) % period, (t, k) => {
+      const n = mix32(p.hash, k, salt);
+      const [code, category, message, type] =
+        logName === 'Security'
+          ? n % 10 === 0
+            ? ['4625', 'Logon', 'An account failed to log on.', 'Audit Failure']
+            : ['4624', 'Logon', 'An account was successfully logged on.', 'Audit Success']
+          : logName === 'System'
+            ? ['7036', 'None', 'The Windows Update service entered the running state.', 'Information']
+            : logName === 'Directory Service'
+              ? [
+                  '1644',
+                  'Field Engineering',
+                  'Internal event: A client issued a search operation.',
+                  'Information',
+                ]
+              : ['1000', 'None', 'Application started.', 'Information'];
+      const d = new Date(t);
+      const h12 = d.getUTCHours() % 12 || 12;
+      const stamp = `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}/${d.getUTCFullYear()} ${String(h12).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}:${String(d.getUTCSeconds()).padStart(2, '0')} ${d.getUTCHours() < 12 ? 'AM' : 'PM'}`;
+      out.push([
+        t,
+        [
+          stamp,
+          `LogName=${logName}`,
+          `EventCode=${code}`,
+          `EventType=0`,
+          `ComputerName=${p.fqdn}`,
+          `SourceName=${logName === 'Security' ? 'Microsoft Windows security auditing.' : 'Service Control Manager'}`,
+          `Type=${type}`,
+          `RecordNumber=${1_000_000 + k}`,
+          `Keywords=${type}`,
+          `TaskCategory=${category}`,
+          `OpCode=Info`,
+          `Message=${message}`,
+        ].join('\n'),
+      ]);
+    });
+    return out;
+  });
 }
 
 /** Static-ish logs that only get a few lines: splunkd-utility.log, audit.log, health.log. */
 export function smallLog(world: World, p: HostProfile, kind: 'utility' | 'audit' | 'health'): LogSource {
-  return {
-    windowMs: 7 * 86_400_000,
-    lines(t0, t1) {
-      const boot = p.bootTime + 45_000;
-      const out: string[] = [];
-      if (kind === 'utility' && boot > t0 && boot <= t1)
-        out.push(
-          `${splunkTs(boot)} INFO  ServerConfig - Found no hostname options in server.conf. Will attempt to use default for now.`,
-        );
-      if (kind === 'audit')
-        periodic(t0, t1, 3_600_000, p.hash % 3_600_000, (t) =>
-          out.push(
-            `${splunkTs(t)} Audit:[timestamp=${splunkTs(t)}, user=splunk-system-user, action=search, info=granted ][n/a]`,
-          ),
-        );
-      if (kind === 'health')
-        periodic(t0, t1, 600_000, p.hash % 600_000, (t) =>
-          out.push(
-            `${splunkTs(t)} INFO  PeriodicHealthReporter - feature="TailReader-0" color=green due_to_stanza="feature:batchreader" node_type=feature node_path=splunkd.file_monitor_input.tailreader-0`,
-          ),
-        );
-      void world;
-      return out;
-    },
-  };
+  void world;
+  return source(7 * 86_400_000, (t0, t1) => {
+    const boot = p.bootTime + 45_000;
+    const out: Entry[] = [];
+    if (kind === 'utility' && boot > t0 && boot <= t1)
+      out.push([
+        boot,
+        `${splunkTs(boot)} INFO  ServerConfig - Found no hostname options in server.conf. Will attempt to use default for now.`,
+      ]);
+    if (kind === 'audit')
+      periodic(t0, t1, 3_600_000, p.hash % 3_600_000, (t) =>
+        out.push([
+          t,
+          `${splunkTs(t)} Audit:[timestamp=${splunkTs(t)}, user=splunk-system-user, action=search, info=granted ][n/a]`,
+        ]),
+      );
+    if (kind === 'health')
+      periodic(t0, t1, 600_000, p.hash % 600_000, (t) =>
+        out.push([
+          t,
+          `${splunkTs(t)} INFO  PeriodicHealthReporter - feature="TailReader-0" color=green due_to_stanza="feature:batchreader" node_type=feature node_path=splunkd.file_monitor_input.tailreader-0`,
+        ]),
+      );
+    return out;
+  });
 }

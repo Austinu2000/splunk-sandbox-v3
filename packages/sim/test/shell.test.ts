@@ -308,7 +308,8 @@ describe('safety (CLAUDE.md rule 1)', () => {
         if (statSync(p).isDirectory()) walk(p);
         else if (p.endsWith('.ts')) {
           const src = readFileSync(p, 'utf8');
-          if (/child_process|\beval\s*\(|new Function\s*\(|\bexecSync\b|\bspawn\s*\(/.test(src))
+          // `eval(` right after a quote is SPL text inside a string, not JavaScript's eval.
+          if (/child_process|(?<![\w.'"`])eval\s*\(|new Function\s*\(|\bexecSync\b|\bspawn\s*\(/.test(src))
             offenders.push(p);
         }
       }

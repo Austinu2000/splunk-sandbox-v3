@@ -1,0 +1,298 @@
+import { appsFor, matchRules } from '../derive/state';
+import { forwarderRecord, hostname as fleetHostname, ipAddress } from '../fleet/query';
+import { DOMAIN, ENTERPRISE_VERSION, resolveHost, splunkdRunning, type HostProfile } from '../hosts/profile';
+import { hostTimeline, type Timeline } from '../logs/sources';
+import { clusterIndexes } from '../hosts/confs';
+import { mix32 } from '../rng';
+import type { RunContext } from './commands';
+import { candidateHosts, delivered, hostSources, indexAllowed, INDEXES } from './data';
+import { Row } from './row';
+import { pushdown, parseSearch } from './search';
+import { SplError, type Value } from './values';
+
+// ---------------------------------------------------------------- lookups
+
+export interface LookupTable {
+  columns: string[];
+  rows: Row[];
+}
+
+const SITE_CONTACTS: Record<string, [string, string]> = {
+  dal: ['platform-dal', '#ops-dallas'],
+  ash: ['platform-ash', '#ops-ashburn'],
+  fra: ['platform-eu', '#ops-frankfurt'],
+};
+
+/** Lookup tables. forwarder_inventory is built from the live fleet, so lookups agree with dashboards. */
+export function lookupTable(ctx: RunContext, rawName: string): LookupTable {
+  const name = rawName.replace(/\.csv$/, '');
+  const { world } = ctx;
+  if (name === 'forwarder_inventory') {
+    const columns = ['host', 'site', 'site_name', 'server_class', 'os', 'version', 'output_group', 'health'];
+    const rows: Row[] = [];
+    for (let r = 0; r < world.fleet.size; r++) {
+      const rec = forwarderRecord(world, r);
+      rows.push(
+        Row.of({
+          host: rec.hostname,
+          site: rec.site,
+          site_name: world.config.sites.find((s) => s.id === rec.site)!.name,
+          server_class: rec.serverClass,
+          os: rec.os,
+          version: rec.version,
+          output_group: rec.outputGroup,
+          health: rec.health,
+        }),
+      );
+    }
+    return { columns, rows };
+  }
+  if (name === 'site_contacts') {
+    return {
+      columns: ['site', 'site_name', 'oncall_team', 'slack_channel'],
+      rows: world.config.sites.map((s) =>
+        Row.of({
+          site: s.id,
+          site_name: s.name,
+          oncall_team: SITE_CONTACTS[s.id]?.[0] ?? 'platform',
+          slack_channel: SITE_CONTACTS[s.id]?.[1] ?? '#ops',
+        }),
+      ),
+    };
+  }
+  if (name === 'indexer_inventory') {
+    return {
+      columns: ['host', 'role', 'site', 'ip', 'status'],
+      rows: world.infra.map((n) =>
+        Row.of({ host: n.hostname, role: n.role, site: n.site, ip: n.ip, status: n.status }),
+      ),
+    };
+  }
+  throw new SplError(
+    `The lookup table '${rawName}' does not exist or is not available. Available: forwarder_inventory, site_contacts, indexer_inventory.`,
+    'lookup',
+  );
+}
+
+// ---------------------------------------------------------------- makeresults
+
+export function makeresults(ctx: RunContext, count: number): Row[] {
+  return Array.from({ length: Math.max(1, count) }, () => Row.of({ _time: Math.floor(ctx.now / 1000) }));
+}
+
+// ---------------------------------------------------------------- rest
+
+const ROLES: Record<string, string[]> = {
+  indexer: ['indexer', 'cluster_peer', 'license_peer'],
+  search_head: ['search_head', 'cluster_search_head', 'license_peer'],
+  deployment_server: ['deployment_server', 'license_peer'],
+  cluster_manager: ['cluster_manager', 'license_peer'],
+  license_manager: ['license_manager'],
+  heavy_forwarder: ['heavy_forwarder', 'license_peer'],
+};
+
+function serverInfo(world: RunContext['world'], p: HostProfile): Row {
+  return Row.of({
+    splunk_server: p.hostname,
+    serverName: p.hostname,
+    host_fqdn: p.fqdn,
+    version: ENTERPRISE_VERSION,
+    os_name: 'Linux',
+    numberOfCores: p.cpus,
+    physicalMemoryMB: p.memMB,
+    server_roles: ROLES[p.role] ?? [],
+    guid: p.splunk!.guid,
+    health_info: splunkdRunning(world, p) ? 'green' : 'red',
+    startup_time: Math.floor(p.bootTime / 1000),
+  });
+}
+
+/** A few REST endpoints, as seen from search head sh01 with the indexers as search peers. */
+export function rest(ctx: RunContext, endpoint: string, opts: Map<string, string>, command: string): Row[] {
+  const { world } = ctx;
+  const path = endpoint.replace(/^\/?(services|servicesNS\/[^/]+\/[^/]+)\//, '').replace(/^\//, '');
+  const server = opts.get('splunk_server');
+  const sh = resolveHost(world, 'sh01')!;
+  const indexers = world.infra
+    .filter((n) => n.role === 'indexer')
+    .map((n) => resolveHost(world, n.hostname)!);
+  const peers = [sh, ...indexers.filter((p) => splunkdRunning(world, p))];
+  const scope = (rows: Row[]) =>
+    server && server !== '*'
+      ? rows.filter((r) => r.get('splunk_server') === (server === 'local' ? 'sh01' : server))
+      : rows;
+
+  switch (path) {
+    case 'server/info':
+      return scope(peers.map((p) => serverInfo(world, p)));
+    case 'search/distributed/peers':
+      return indexers.map((p) =>
+        Row.of({
+          splunk_server: 'sh01',
+          title: `${p.fqdn}:8089`,
+          peerName: p.hostname,
+          status: splunkdRunning(world, p) ? 'Up' : 'Down',
+          version: ENTERPRISE_VERSION,
+        }),
+      );
+    case 'cluster/manager/peers':
+    case 'cluster/master/peers':
+      return indexers.map((p) =>
+        Row.of({
+          splunk_server: 'cm01',
+          label: p.hostname,
+          site: p.site,
+          status: splunkdRunning(world, p) ? 'Up' : 'Down',
+          is_searchable: splunkdRunning(world, p) ? '1' : '0',
+          bucket_count: 4000 + (mix32(p.hash, 1) % 2000),
+        }),
+      );
+    case 'data/indexes':
+      return scope(
+        indexers
+          .filter((p) => splunkdRunning(world, p))
+          .flatMap((p) =>
+            ['_internal', '_audit', 'main', ...clusterIndexes()].map((idx) =>
+              Row.of({
+                splunk_server: p.hostname,
+                title: idx,
+                currentDBSizeMB: 1000 + (mix32(p.hash, idx.length) % 90000),
+                maxTotalDataSizeMB: 500000,
+                frozenTimePeriodInSecs:
+                  idx === '_internal' ? 2592000 : idx === 'network' ? 7776000 : 31536000,
+                homePath: `$SPLUNK_DB/${idx === 'main' ? 'defaultdb' : idx === '_internal' ? '_internaldb' : idx}/db`,
+                disabled: '0',
+              }),
+            ),
+          ),
+      );
+    case 'deployment/server/clients': {
+      if (server && server !== 'ds01')
+        throw new SplError(
+          `Failed to fetch REST endpoint uri=https://${server}.${DOMAIN}:8089/services/deployment/server/clients status=404 (not a deployment server)`,
+          command,
+        );
+      const rows: Row[] = [];
+      const rules = world.derived.rules;
+      for (let r = 0; r < world.fleet.size; r++) {
+        const h = fleetHostname(world, r);
+        const names = [h, `${h}.${DOMAIN}`, ipAddress(world, r)];
+        const rec = forwarderRecord(world, r);
+        rows.push(
+          Row.of({
+            splunk_server: 'ds01',
+            hostname: h,
+            clientName: h,
+            dns: `${h}.${DOMAIN}`,
+            ip: rec.ip,
+            utsname: rec.os === 'windows' ? 'windows-x64' : 'linux-x86_64',
+            build: rec.version,
+            lastPhoneHomeTime: Math.floor(rec.lastPhoneHome / 1000),
+            serverClasses: matchRules(rules, names).map((x) => x.name),
+            applications: appsFor(rules, names),
+          }),
+        );
+      }
+      return rows;
+    }
+  }
+  throw new SplError(
+    `Failed to fetch REST endpoint uri=https://sh01.${DOMAIN}:8089/services/${path} status=404 (not simulated in this sandbox)`,
+    command,
+  );
+}
+
+// ---------------------------------------------------------------- metadata
+
+const STEP_BACK = [60_000, 60 * 60_000, 24 * 3_600_000];
+
+/**
+ * When a host stopped delivering events, or null if it is delivering at `now`. Uses the health
+ * timeline (offline, or blocked without having recovered) and, for older outages, healthSince.
+ */
+function deliveryStoppedAt(
+  world: RunContext['world'],
+  p: HostProfile,
+  tl: Timeline,
+  now: number,
+): number | null {
+  if (delivered(tl, now) && splunkdRunning(world, p)) return null;
+  const current = tl.stateAt(now);
+  const into = tl.transitions.filter((t) => t.to === current && t.time <= now).at(-1);
+  if (into) return into.time;
+  if (p.fleetRow !== undefined) return world.fleet.healthSince[p.fleetRow]!;
+  const stop = world.hosts.services
+    .get(p.hostname)
+    ?.events.filter((e) => e.kind === 'stop')
+    .at(-1);
+  return stop?.time ?? now;
+}
+
+/**
+ * `| metadata`: first/last event times and counts per host, source or sourcetype. lastTime is exact
+ * (found by walking back from now until a delivered event); totalCount is estimated from the rate
+ * over the last ten minutes, scaled to the time range.
+ */
+export function metadata(ctx: RunContext, type: string, index: string | undefined, command: string): Row[] {
+  if (!['hosts', 'sources', 'sourcetypes'].includes(type))
+    throw new SplError('Invalid type. Use type=hosts, type=sources or type=sourcetypes.', command);
+  const pd = pushdown(parseSearch(index ? `index=${index}` : ''));
+  const { world, earliest, latest } = ctx;
+  const wantData = INDEXES.some((i) => !i.startsWith('_') && indexAllowed(pd, i));
+  const groups = new Map<string, { first: number; last: number; count: number }>();
+  const add = (key: string, last: number, count: number) => {
+    const g = groups.get(key) ?? { first: earliest, last: 0, count: 0 };
+    g.last = Math.max(g.last, last);
+    g.count += count;
+    groups.set(key, g);
+  };
+  for (const p of candidateHosts(world, pd)) {
+    const tl = hostTimeline(world, p, latest - STEP_BACK.at(-1)!);
+    // Events stop at the moment delivery stopped (offline, or blocked and not yet recovered).
+    const stoppedAt = p.fleetRow === undefined && !p.splunk ? null : deliveryStoppedAt(world, p, tl, latest);
+    const until = Math.min(latest, stoppedAt ?? latest);
+    if (until <= earliest) continue;
+    for (const s of hostSources(world, p, wantData)) {
+      if (!indexAllowed(pd, s.index)) continue;
+      const deliveredTimes = (t0: number, t1: number) =>
+        s.log
+          .entries(t0, t1)
+          .map((e) => e[0])
+          .filter((t) => p.fleetRow === undefined || delivered(tl, t));
+      // Last event: look back from when delivery stopped, widening the window until something turns up.
+      // The same window gives the event rate for the (estimated) count.
+      let last: number | null = null;
+      let rate = 0;
+      let lo = until;
+      for (const back of STEP_BACK) {
+        const t0 = Math.max(earliest, until - back);
+        if (t0 >= lo) break;
+        const times = deliveredTimes(t0, lo);
+        if (times.length) {
+          last = Math.max(...times);
+          rate = times.length / (until - t0);
+          break;
+        }
+        lo = t0;
+      }
+      if (last === null) continue;
+      const count = Math.round(rate * (until - Math.max(earliest, p.bootTime)));
+      const key = type === 'hosts' ? (s.host ?? p.hostname) : type === 'sources' ? s.source : s.sourcetype;
+      add(key, last, Math.max(count, 1));
+    }
+  }
+  const field = type === 'hosts' ? 'host' : type === 'sources' ? 'source' : 'sourcetype';
+  return [...groups.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([k, g]) => {
+      const row: Record<string, Value> = {
+        firstTime: Math.floor(g.first / 1000),
+        lastTime: Math.floor(g.last / 1000),
+        recentTime: Math.floor(g.last / 1000),
+        totalCount: g.count,
+        type,
+      };
+      row[field] = k;
+      return Row.of({ [field]: k, ...row });
+    });
+}

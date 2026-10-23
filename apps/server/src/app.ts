@@ -9,6 +9,7 @@ import {
   worldInfo,
   type World,
 } from '@sandbox/sim';
+import { registerSearch } from './search';
 import { registerTerminal } from './terminal';
 
 const filterProps = {
@@ -36,6 +37,7 @@ export interface SandboxApp {
 export function buildApp(world: World, opts: { logger?: boolean } = {}): SandboxApp {
   const app = Fastify({ logger: opts.logger ?? false });
   const terminals = registerTerminal(app, world);
+  registerSearch(app, world);
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
     if (err instanceof FilterError || err.validation) return reply.code(400).send({ error: err.message });

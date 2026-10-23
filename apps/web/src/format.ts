@@ -36,3 +36,22 @@ export function fmtAgo(then: number, now: number): string {
   if (h < 48) return `${h}h ${m % 60}m ago`;
   return `${Math.floor(h / 24)}d ago`;
 }
+
+const p2 = (n: number) => String(n).padStart(2, '0');
+
+/** Splunk's event-list time: ["10/23/26", "8:14:56.513 AM"] (UTC, like the rest of the sim). */
+export function fmtEventTime(seconds: number): [string, string] {
+  const d = new Date(seconds * 1000);
+  const h = d.getUTCHours();
+  return [
+    `${p2(d.getUTCMonth() + 1)}/${p2(d.getUTCDate())}/${String(d.getUTCFullYear()).slice(2)}`,
+    `${h % 12 || 12}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}.${String(d.getUTCMilliseconds()).padStart(3, '0')} ${h < 12 ? 'AM' : 'PM'}`,
+  ];
+}
+
+/** Statistics-table time: 2026-10-23 08:14:00 */
+export function fmtTableTime(seconds: number): string {
+  const d = new Date(seconds * 1000);
+  const ms = d.getUTCMilliseconds();
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}${ms ? '.' + String(ms).padStart(3, '0') : ''}`;
+}

@@ -6,7 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 
-**Status:** milestone 3 of 8: Fleet Overview, a simulated SSH terminal, and a config layer where edits take effect only after the right restart or reload.
+**Status:** milestone 4 of 8: Fleet Overview, a simulated SSH terminal, a config layer where edits take effect only after the right restart or reload, and Search & Reporting with an SPL subset.
 
 ## Requirements
 
@@ -41,9 +41,10 @@ npm run lint        # ESLint (also blocks child_process, eval, Math.random/Date.
 packages/shared   types shared by server and web
 packages/sim      the simulated world: seeded RNG, fleet tables, health evolution, queries,
                   host profiles, log generators, virtual filesystem, shell emulator,
-                  .conf parser/btool, running config, config → fleet derivation
+                  .conf parser/btool, running config, config → fleet derivation,
+                  SPL parser/executor and the indexed-event view (src/spl)
 apps/server       Fastify API, ticks the world in wall-clock time
-apps/web          React + Vite UI (Fleet Overview, Terminal)
+apps/web          React + Vite UI (Fleet Overview, Terminal, Search & Reporting)
 scenarios/        incident files (milestone 5+)
 ```
 
@@ -117,6 +118,51 @@ A PowerShell-style shell for Windows forwarders is deferred to when Windows host
 
 The Fleet Overview, the terminal and the logs all read this one state. For example, stop `idx01` and `idx02` at 30× and the Dallas forwarders turn blocked within a minute.
 
+## Search & Reporting (milestone 4)
+
+Open **Search & Reporting**, or click any hostname in the Fleet Overview. The page has:
+- a search bar and time-range presets (default: last 15 minutes of sim time);
+- an events view with a timeline histogram, a fields sidebar (top values, click to add to the search) and expandable events;
+- Statistics and Visualization tabs (line, column, bar, pie, single value);
+- a job inspector showing scan count, run time and per-phase costs.
+
+**Data.** Events are generated on demand by the same log generators the terminal reads, so `tail` on a host and a search for that host return the same lines. Indexes:
+
+| Index | Contents |
+|---|---|
+| `_internal` | `splunkd.log`, `metrics.log` and `health.log` from every forwarder and infrastructure node (sourcetype `splunkd`, as in real Splunk) |
+| `_audit` | `audit.log` (`audittrail`) |
+| `os` | `/var/log/messages` (`syslog`) and `/var/log/secure` (`linux_secure`) from Linux forwarders with `Splunk_TA_nix`; `WinEventLog:*` from Windows forwarders |
+| `app` | `app:log`, `access_combined` and `mysqld` from the class's monitored file |
+| `network` | ASA syslog via the syslog relays (`host` is the firewall, from `host_segment`) |
+
+What gets indexed follows the world:
+- Nothing arrives while a forwarder is offline.
+- A blocked forwarder delivers nothing until it unblocks, and then its backlog arrives with the original timestamps.
+- Removing an inputs app on the deployment server stops that data, while `_internal` carries on.
+- `splunk_server` is the indexer the forwarder was connected to at the time.
+
+**SPL subset.** The base search supports terms, `"phrases"`, `field=value` with wildcards, `!= < <= > >=`, `AND`/`OR`/`NOT` (OR binds tighter than AND, as in Splunk), and `earliest=`/`latest=` (relative, snapped, epoch or absolute). Commands:
+
+| Kind | Commands |
+|---|---|
+| Streaming | `search` `where` `eval` `rex` (named groups, `field=`, `max_match=`) `rename` |
+| Ordering and reshaping | `fields` `table` `sort` `head` `tail` `dedup` `fillnull` `lookup` |
+| Transforming | `stats` (count dc sum avg min max range median mode stdev var values list first last earliest latest percN, `by`) `timechart` (span, limit, OTHER) `top` `rare` |
+| Generating | `inputlookup` `rest` `metadata` `makeresults` |
+
+- `eval`/`where` support arithmetic, `.` concatenation, comparisons, `AND`/`OR`/`NOT`/`XOR`, `LIKE`, and functions such as `if` `case` `coalesce` `len` `lower` `upper` `substr` `replace` `match` `like` `round` `tonumber` `tostring` `strftime` `strptime` `relative_time` `now` `split` `mvcount` `mvindex` `mvjoin` `cidrmatch` `isnull` `isnotnull`.
+- Unsupported commands, subsearches and `tstats` return Splunk-style errors (`tstats` is planned).
+- Lookups: `forwarder_inventory` (built live from the fleet, so it agrees with the dashboard), `site_contacts` and `indexer_inventory`.
+- `rest` endpoints: `server/info`, `search/distributed/peers`, `cluster/manager/peers`, `data/indexes` and `deployment/server/clients`.
+- `metadata type=hosts|sources|sourcetypes`: `lastTime` is exact; `totalCount` is an estimate from the recent event rate.
+
+**Scale.** A full fleet-wide raw scan is too much to generate, so the scan uses pushdown. If a search still exceeds the budget (3M events or 8 s), it stops with Splunk's "results may be incomplete" warning.
+- **Indexed-field filtering:** `index`, `sourcetype`, `source` and `host` constraints skip hosts and sources before any events are generated.
+- **Gates:** words such as `blocked`, `WARN` or `HttpPubSubConnection` only appear while a host is in certain states. Hosts that were never in those states during the time range are skipped. Tests check that this never changes results.
+
+Typical full-scale times (35,000 forwarders, 15 minutes): fleet-wide `blocked=true` about 0.6 s, `log_level=WARN | stats count by component` about 1 s, `| metadata type=hosts index=_internal` about 2.5 s.
+
 ## API
 
 ### Fleet (milestone 1)
@@ -134,3 +180,11 @@ The Fleet Overview, the terminal and the logs all read this one state. For examp
 |---|---|---|
 | GET | `/api/hosts/roster` | SSH-able infrastructure hosts and the detailed forwarder |
 | WS | `/ws/term?cols=&rows=` | client sends `{type:"input",data}` / `{type:"resize",cols,rows}`; server sends `{type:"output",data}` and `{type:"location",host,user}`. Only local origins are accepted, with at most 8 sessions. |
+
+### Search (milestone 4)
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/search/jobs` | `{ search, earliest?, latest? }`; runs synchronously and returns the job summary plus the first page of events and results |
+| GET | `/api/search/jobs/:sid/events` | `offset`, `count` (≤500) |
+| GET | `/api/search/jobs/:sid/results` | `offset`, `count` (≤500); the last 20 jobs are kept |

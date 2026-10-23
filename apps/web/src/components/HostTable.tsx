@@ -1,5 +1,6 @@
 import { HEALTH_LABELS, type HostPage, type HostSortKey } from '@sandbox/shared';
 import { fmtAgo, fmtInt, HEALTH_COLORS } from '../format';
+import { searchHash } from '../links';
 
 export interface SortState {
   sort: HostSortKey;
@@ -86,7 +87,14 @@ export function HostTable({
           <tbody>
             {rows.map((r) => (
               <tr key={r.hostname}>
-                <td className="mono">{r.hostname}</td>
+                <td className="mono">
+                  <a
+                    href={searchHash(`index=_internal host=${r.hostname}`, '-60m')}
+                    title="Search this forwarder's _internal events"
+                  >
+                    {r.hostname}
+                  </a>
+                </td>
                 <td>
                   <span className="dot" style={{ background: HEALTH_COLORS[r.health] }} />
                   {HEALTH_LABELS[r.health]}

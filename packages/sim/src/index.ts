@@ -26,3 +26,4 @@ export {
 export { resolveHost, sshRoster, DETAILED_HOSTS, type HostProfile, type RosterEntry } from './hosts/profile';
 export { TerminalSession, type SessionOptions } from './shell/session';
 export { stripAnsi } from './shell/ansi';
+export { runSearch, rowToPlain, eventToPlain, type SearchOutcome, type SearchRequest } from './spl/run';

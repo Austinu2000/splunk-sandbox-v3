@@ -103,3 +103,65 @@ export interface WorldInfo {
 
 export const CLOCK_SPEEDS = [1, 5, 30] as const;
 export type ClockSpeed = (typeof CLOCK_SPEEDS)[number];
+
+// ---------------------------------------------------------------- search (milestone 4)
+
+export type ResultValue = string | number | null | string[];
+
+export interface SearchRequestDto {
+  search: string;
+  earliest: string;
+  latest: string;
+}
+
+export interface SearchEventDto {
+  /** Epoch seconds. */
+  time: number;
+  raw: string;
+  host: string;
+  source: string;
+  sourcetype: string;
+  index: string;
+  fields: Record<string, ResultValue>;
+}
+
+export interface FieldSummaryDto {
+  name: string;
+  count: number;
+  distinct: number;
+  numeric: boolean;
+  top: { value: string; count: number }[];
+}
+
+export interface SearchMessageDto {
+  type: 'info' | 'warn' | 'error';
+  text: string;
+}
+
+export interface SearchJobDto {
+  sid: string;
+  search: string;
+  /** Epoch ms of the resolved time range. */
+  earliest: number;
+  latest: number;
+  status: 'done' | 'failed';
+  kind: 'events' | 'statistics';
+  eventCount: number;
+  resultCount: number;
+  scanCount: number;
+  hostsScanned: number;
+  truncated: boolean;
+  runMs: number;
+  messages: SearchMessageDto[];
+  timeline: { time: number; count: number }[];
+  timelineSpanMs: number;
+  fields: FieldSummaryDto[];
+  columns: string[];
+  phases: { name: string; ms: number; rows: number }[];
+}
+
+export interface PageDto<T> {
+  offset: number;
+  total: number;
+  items: T[];
+}

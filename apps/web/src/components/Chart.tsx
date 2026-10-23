@@ -1,10 +1,18 @@
 import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts/core';
-import { BarChart } from 'echarts/charts';
+import { BarChart, LineChart, PieChart } from 'echarts/charts';
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 
-echarts.use([BarChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
+echarts.use([
+  BarChart,
+  LineChart,
+  PieChart,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+  CanvasRenderer,
+]);
 
 export type ChartClick = { name: string; seriesId?: string };
 
@@ -35,7 +43,7 @@ export function Chart({
   }, []);
 
   useEffect(() => {
-    chart.current?.setOption(option, { notMerge: false, lazyUpdate: true });
+    chart.current?.setOption(option, { notMerge: true, lazyUpdate: true });
   }, [option]);
 
   return <div ref={el} style={{ height, width: '100%' }} />;
