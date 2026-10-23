@@ -1,20 +1,24 @@
 import { CLOCK_SPEEDS, type ClockSpeed, type WorldInfo } from '@sandbox/shared';
 import { fmtClock } from '../format';
 
-const NAV: { label: string; milestone?: number }[] = [
-  { label: 'Fleet Overview' },
+export type Route = 'fleet' | 'terminal';
+
+const NAV: { label: string; route?: Route; milestone?: number }[] = [
+  { label: 'Fleet Overview', route: 'fleet' },
+  { label: 'Terminal', route: 'terminal' },
   { label: 'Search & Reporting', milestone: 4 },
   { label: 'Monitoring Console', milestone: 6 },
   { label: 'Forwarder Management', milestone: 6 },
   { label: 'Settings', milestone: 6 },
-  { label: 'Terminal', milestone: 2 },
 ];
 
 export function TopBar({
   world,
+  route,
   onClock,
 }: {
   world: WorldInfo | null;
+  route: Route;
   onClock: (patch: { paused?: boolean; speed?: ClockSpeed }) => void;
 }) {
   return (
@@ -55,15 +59,25 @@ export function TopBar({
         </div>
       </div>
       <nav className="appbar">
-        {NAV.map((item) => (
-          <span
-            key={item.label}
-            className={item.milestone ? 'nav-item disabled' : 'nav-item active'}
-            title={item.milestone ? `Coming in milestone ${item.milestone}` : undefined}
-          >
-            {item.label}
-          </span>
-        ))}
+        {NAV.map((item) =>
+          item.route ? (
+            <a
+              key={item.label}
+              href={`#/${item.route}`}
+              className={`nav-item ${route === item.route ? 'active' : ''}`}
+            >
+              {item.label}
+            </a>
+          ) : (
+            <span
+              key={item.label}
+              className="nav-item disabled"
+              title={`Coming in milestone ${item.milestone}`}
+            >
+              {item.label}
+            </span>
+          ),
+        )}
       </nav>
     </header>
   );

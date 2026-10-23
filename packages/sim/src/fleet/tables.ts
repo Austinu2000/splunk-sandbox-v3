@@ -1,7 +1,10 @@
 import { HEALTH_STATES, type HealthState } from '@sandbox/shared';
 
 /** Numeric code for each health state: its index in HEALTH_STATES. */
-export const HEALTH_CODE = Object.fromEntries(HEALTH_STATES.map((s, i) => [s, i])) as Record<HealthState, number>;
+export const HEALTH_CODE = Object.fromEntries(HEALTH_STATES.map((s, i) => [s, i])) as Record<
+  HealthState,
+  number
+>;
 export const HEALTHY = 0;
 export const STALE = HEALTH_CODE.stale_phonehome;
 export const BLOCKED = HEALTH_CODE.blocked_queue;

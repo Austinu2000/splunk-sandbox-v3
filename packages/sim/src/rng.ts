@@ -91,14 +91,23 @@ export function hashString(str: string): number {
   return cyrb128(str)[0];
 }
 
-/** Fast stateless integer mix of up to four values (murmur3 finaliser style). */
-export function mix32(a: number, b: number, c = 0, d = 0): number {
-  let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b);
-  h = Math.imul(h ^ (h >>> 13) ^ b, 0xc2b2ae35);
-  h = Math.imul(h ^ (h >>> 16) ^ c, 0x85ebca6b);
-  h = Math.imul(h ^ (h >>> 13) ^ d, 0xc2b2ae35);
+/** murmur3 32-bit finaliser: full avalanche, so neighbouring inputs give unrelated outputs. */
+function fmix32(x: number): number {
+  let h = x >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
   h ^= h >>> 16;
   return h >>> 0;
+}
+
+/** Fast stateless integer mix of up to four values. */
+export function mix32(a: number, b: number, c = 0, d = 0): number {
+  let h = fmix32(a ^ 0x9e3779b9);
+  h = fmix32(h ^ b);
+  h = fmix32(h ^ c);
+  return fmix32(h ^ d);
 }
 
 /** Stateless uniform float in [0, 1) from integer inputs. */

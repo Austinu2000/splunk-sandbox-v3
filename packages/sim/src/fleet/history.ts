@@ -61,6 +61,30 @@ export class HealthHistory {
     return state;
   }
 
+  /**
+   * One pass over the buffer that returns a fast state lookup for `row` at any time after `after`,
+   * plus that row's transitions in order. Use this instead of repeated stateAt() calls.
+   */
+  timeline(
+    row: number,
+    after: number,
+    current: number,
+  ): { stateAt(time: number): number; transitions: { time: number; from: number; to: number }[] } {
+    const transitions: { time: number; from: number; to: number }[] = [];
+    for (let k = 0; k < this.len; k++) {
+      const i = (this.start + k) % this.capacity;
+      if (this.row[i] === row && this.time[i]! > after)
+        transitions.push({ time: this.time[i]!, from: this.from[i]!, to: this.to[i]! });
+    }
+    return {
+      transitions,
+      stateAt(time: number): number {
+        for (const t of transitions) if (t.time > time) return t.from;
+        return current;
+      },
+    };
+  }
+
   *entries(): Generator<{ time: number; row: number; from: number; to: number }> {
     for (let k = 0; k < this.len; k++) {
       const i = (this.start + k) % this.capacity;

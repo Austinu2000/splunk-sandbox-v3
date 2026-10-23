@@ -9,6 +9,7 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
+    "@fastify/websocket": "^11.3.4",
     "@sandbox/shared": "*",
     "@sandbox/sim": "*",
     "fastify": "^5.2.0"

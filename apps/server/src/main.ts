@@ -10,8 +10,8 @@ const fleetSize = process.env.SANDBOX_FLEET_SIZE ? Number(process.env.SANDBOX_FL
 
 const started = performance.now();
 const world = createWorld({ seed, ...(fleetSize ? { fleetSize } : {}) });
-const app = buildApp(world, { logger: true });
-const ticker = new SimTicker(world);
+const { app, onTick } = buildApp(world, { logger: true });
+const ticker = new SimTicker(world, onTick);
 
 await app.listen({ host: HOST, port: PORT });
 ticker.start();

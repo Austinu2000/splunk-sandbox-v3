@@ -1,4 +1,18 @@
-import type { ClockSpeed, FleetFilter, FleetSummary, HostPage, HostSortKey, WorldInfo } from '@sandbox/shared';
+import type {
+  ClockSpeed,
+  FleetFilter,
+  FleetSummary,
+  HostPage,
+  HostSortKey,
+  WorldInfo,
+} from '@sandbox/shared';
+
+export interface RosterEntry {
+  hostname: string;
+  role: string;
+  site: string;
+  detailed: boolean;
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -16,6 +30,7 @@ function query(params: Record<string, string | number | undefined>): string {
 
 export const api = {
   world: () => request<WorldInfo>('/api/world'),
+  roster: () => request<RosterEntry[]>('/api/hosts/roster'),
   setClock: (patch: { paused?: boolean; speed?: ClockSpeed }) =>
     request<WorldInfo>('/api/world/clock', {
       method: 'POST',

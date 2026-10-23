@@ -12,7 +12,10 @@ export function KpiTiles({
 }) {
   return (
     <div className="tiles">
-      <button className={`tile ${selected === undefined ? 'selected' : ''}`} onClick={() => onSelect(undefined)}>
+      <button
+        className={`tile ${selected === undefined ? 'selected' : ''}`}
+        onClick={() => onSelect(undefined)}
+      >
         <div className="tile-value">{fmtInt(summary.total)}</div>
         <div className="tile-label">Forwarders</div>
       </button>

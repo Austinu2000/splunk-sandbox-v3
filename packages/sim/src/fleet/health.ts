@@ -31,8 +31,13 @@ export function queueFillPct(world: World, row: number, now: number): number {
   return Math.round(4 + unit(world.seedHash, row, minute, 0x0f11) * 22);
 }
 
-export function throughputKBps(world: World, row: number, now: number): number {
-  const h = world.fleet.health[row]!;
+export function throughputKBps(
+  world: World,
+  row: number,
+  now: number,
+  health = world.fleet.health[row]!,
+): number {
+  const h = health;
   if (h === BLOCKED || h === OFFLINE) return 0;
   const base = world.config.serverClasses[world.fleet.serverClass[row]!]!.baseThroughputKBps;
   const minute = Math.floor(now / 60_000);

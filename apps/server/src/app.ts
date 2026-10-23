@@ -1,6 +1,15 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { CLOCK_SPEEDS, HEALTH_STATES, type FleetFilter, type HostSortKey } from '@sandbox/shared';
-import { FilterError, listHosts, setClock, summarizeFleet, worldInfo, type World } from '@sandbox/sim';
+import {
+  FilterError,
+  listHosts,
+  setClock,
+  sshRoster,
+  summarizeFleet,
+  worldInfo,
+  type World,
+} from '@sandbox/sim';
+import { registerTerminal } from './terminal';
 
 const filterProps = {
   site: { type: 'string' },
@@ -18,8 +27,15 @@ function toFilter(q: FilterQuery): FleetFilter {
   return { site, serverClass, health, os, q: text };
 }
 
-export function buildApp(world: World, opts: { logger?: boolean } = {}): FastifyInstance {
+export interface SandboxApp {
+  app: FastifyInstance;
+  /** Call after each simulation tick so live terminal programs (tail -f) update. */
+  onTick(): void;
+}
+
+export function buildApp(world: World, opts: { logger?: boolean } = {}): SandboxApp {
   const app = Fastify({ logger: opts.logger ?? false });
+  const terminals = registerTerminal(app, world);
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
     if (err instanceof FilterError || err.validation) return reply.code(400).send({ error: err.message });
@@ -30,6 +46,8 @@ export function buildApp(world: World, opts: { logger?: boolean } = {}): Fastify
   app.get('/api/health', async () => ({ ok: true }));
 
   app.get('/api/world', async () => worldInfo(world));
+
+  app.get('/api/hosts/roster', async () => sshRoster(world));
 
   app.post<{ Body: { paused?: boolean; speed?: number } }>(
     '/api/world/clock',
@@ -64,7 +82,11 @@ export function buildApp(world: World, opts: { logger?: boolean } = {}): Fastify
             ...filterProps,
             offset: { type: 'integer', minimum: 0, default: 0 },
             limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
-            sort: { type: 'string', enum: ['hostname', 'lastPhoneHome', 'health', 'site'], default: 'hostname' },
+            sort: {
+              type: 'string',
+              enum: ['hostname', 'lastPhoneHome', 'health', 'site'],
+              default: 'hostname',
+            },
             dir: { type: 'string', enum: ['asc', 'desc'], default: 'asc' },
           },
         },
@@ -76,5 +98,5 @@ export function buildApp(world: World, opts: { logger?: boolean } = {}): Fastify
     },
   );
 
-  return app;
+  return { app, onTick: () => terminals.tickAll() };
 }

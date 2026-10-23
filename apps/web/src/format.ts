@@ -21,7 +21,10 @@ export function fmtPct(part: number, whole: number): string {
 /** Sim time is shown in UTC so it matches the sim's own timestamps everywhere. */
 export function fmtClock(ms: number): string {
   const d = new Date(ms);
-  return d.toUTCString().replace(' GMT', ' UTC').replace(/^\w+, /, '');
+  return d
+    .toUTCString()
+    .replace(' GMT', ' UTC')
+    .replace(/^\w+, /, '');
 }
 
 export function fmtAgo(then: number, now: number): string {

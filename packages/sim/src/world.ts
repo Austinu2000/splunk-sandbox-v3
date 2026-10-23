@@ -6,6 +6,7 @@ import { backgroundRates, evolveFleet } from './fleet/health';
 import { HealthHistory } from './fleet/history';
 import { allocFleet, type FleetTables } from './fleet/tables';
 import { generateInfra, type InfraNode } from './infra';
+import type { OverlayEntry } from './vfs/vfs';
 import { hashString, Rng } from './rng';
 
 export interface WorldClock {
@@ -28,6 +29,15 @@ export interface World {
   infra: InfraNode[];
   /** Version strings indexed by fleet.version: approved versions first, then drift versions. */
   versions: string[];
+  hosts: HostRuntime;
+}
+
+/** Per-host state created by user activity. Generated content is never stored, only changes to it. */
+export interface HostRuntime {
+  /** hostname → path → change on top of the generated filesystem. */
+  fsOverlay: Map<string, Map<string, OverlayEntry>>;
+  /** hostname → sim time of the user's last SSH login. */
+  lastLogin: Map<string, number>;
 }
 
 export function createWorld(overrides: Partial<WorldConfig> = {}): World {
@@ -43,6 +53,7 @@ export function createWorld(overrides: Partial<WorldConfig> = {}): World {
     history: new HealthHistory(1),
     infra: generateInfra(config),
     versions: [...config.approvedVersions.map((v) => v.version), ...config.driftVersions],
+    hosts: { fsOverlay: new Map(), lastLogin: new Map() },
   };
   generateFleet(world);
   world.aggregates = FleetAggregates.fromScan(world.fleet, config.sites.length, config.serverClasses.length);

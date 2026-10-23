@@ -78,12 +78,7 @@ export interface HostPage {
 }
 
 export type InfraRole =
-  | 'indexer'
-  | 'search_head'
-  | 'deployment_server'
-  | 'cluster_manager'
-  | 'license_manager'
-  | 'heavy_forwarder';
+  'indexer' | 'search_head' | 'deployment_server' | 'cluster_manager' | 'license_manager' | 'heavy_forwarder';
 
 export interface InfraNodeInfo {
   hostname: string;

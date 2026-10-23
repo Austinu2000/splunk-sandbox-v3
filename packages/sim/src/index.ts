@@ -1,5 +1,11 @@
 export { Rng, hashString, mix32, unit } from './rng';
-export { defaultWorldConfig, validateConfig, type WorldConfig, type SiteDef, type ServerClassDef } from './config';
+export {
+  defaultWorldConfig,
+  validateConfig,
+  type WorldConfig,
+  type SiteDef,
+  type ServerClassDef,
+} from './config';
 export { createWorld, tickWorld, setClock, worldInfo, type World, type WorldClock } from './world';
 export type { InfraNode } from './infra';
 export type { FleetTables } from './fleet/tables';
@@ -17,3 +23,6 @@ export {
   outputGroup,
   summarizeFleet,
 } from './fleet/query';
+export { resolveHost, sshRoster, DETAILED_HOSTS, type HostProfile, type RosterEntry } from './hosts/profile';
+export { TerminalSession, type SessionOptions } from './shell/session';
+export { stripAnsi } from './shell/ansi';

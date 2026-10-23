@@ -85,8 +85,16 @@ function compileFilter(world: World, filter: FleetFilter): CompiledFilter {
   if (filter.os !== undefined && filter.os !== 'windows' && filter.os !== 'linux')
     throw new FilterError(`Unknown os "${filter.os}"`);
   return {
-    site: lookup('site', filter.site, sites.map((s) => s.id)),
-    cls: lookup('server class', filter.serverClass, serverClasses.map((c) => c.id)),
+    site: lookup(
+      'site',
+      filter.site,
+      sites.map((s) => s.id),
+    ),
+    cls: lookup(
+      'server class',
+      filter.serverClass,
+      serverClasses.map((c) => c.id),
+    ),
     health: lookup('health state', filter.health, [...HEALTH_STATES]),
     osClasses: filter.os ? serverClasses.map((c) => c.os === filter.os) : null,
     q: (filter.q ?? '').trim().toLowerCase(),
@@ -122,10 +130,19 @@ function emptyCounts(): HealthCounts {
  * With no filter this reads the incremental aggregates; with a filter it scans.
  * Tests assert both paths always agree.
  */
-export function summarizeFleet(world: World, filter: FleetFilter = {}, opts: { forceScan?: boolean } = {}): FleetSummary {
+export function summarizeFleet(
+  world: World,
+  filter: FleetFilter = {},
+  opts: { forceScan?: boolean } = {},
+): FleetSummary {
   const cfg = world.config;
   const byHealth = emptyCounts();
-  const bySite: GroupSummary[] = cfg.sites.map((s) => ({ id: s.id, name: s.name, total: 0, byHealth: emptyCounts() }));
+  const bySite: GroupSummary[] = cfg.sites.map((s) => ({
+    id: s.id,
+    name: s.name,
+    total: 0,
+    byHealth: emptyCounts(),
+  }));
   const byServerClass: GroupSummary[] = cfg.serverClasses.map((c) => ({
     id: c.id,
     name: c.id,
@@ -174,7 +191,8 @@ export function listHosts(
     sorted = rows.sort((a, b) => sign * (key.get(a)! - key.get(b)!) || a - b);
   } else {
     const name = new Map(rows.map((r) => [r, hostname(world, r)]));
-    const byName = (a: number, b: number) => (name.get(a)! < name.get(b)! ? -1 : name.get(a)! > name.get(b)! ? 1 : 0);
+    const byName = (a: number, b: number) =>
+      name.get(a)! < name.get(b)! ? -1 : name.get(a)! > name.get(b)! ? 1 : 0;
     const f = world.fleet;
     const primary =
       sort === 'health'

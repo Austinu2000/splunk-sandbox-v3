@@ -7,12 +7,18 @@ import { tickWorld, type World } from '@sandbox/sim';
 export class SimTicker {
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly world: World) {}
+  constructor(
+    private readonly world: World,
+    private readonly onTick: () => void = () => {},
+  ) {}
 
   start(): void {
     if (this.timer) return;
     const loop = () => {
-      if (!this.world.clock.paused) tickWorld(this.world);
+      if (!this.world.clock.paused) {
+        tickWorld(this.world);
+        this.onTick();
+      }
       this.timer = setTimeout(loop, this.world.config.tickMs / this.world.clock.speed);
     };
     this.timer = setTimeout(loop, this.world.config.tickMs / this.world.clock.speed);

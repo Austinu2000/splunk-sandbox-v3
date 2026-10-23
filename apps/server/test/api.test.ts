@@ -5,7 +5,7 @@ import { buildApp } from '../src/app';
 
 const world = createWorld({ seed: 'api-test', fleetSize: 8_000 });
 tickWorld(world, 50);
-const app = buildApp(world);
+const { app } = buildApp(world);
 afterAll(() => app.close());
 
 async function get<T>(url: string): Promise<{ status: number; body: T }> {
@@ -46,11 +46,17 @@ describe('fleet API', () => {
   it('rejects unknown filter values with 400', async () => {
     expect((await get('/api/fleet/summary?site=mars')).status).toBe(400);
     expect((await get('/api/fleet/hosts?health=sad')).status).toBe(400);
-    expect((await get<{ error: string }>('/api/fleet/hosts?serverClass=nope')).body.error).toMatch(/Unknown server class/);
+    expect((await get<{ error: string }>('/api/fleet/hosts?serverClass=nope')).body.error).toMatch(
+      /Unknown server class/,
+    );
   });
 
   it('pauses and changes speed', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/world/clock', payload: { paused: true, speed: 30 } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/world/clock',
+      payload: { paused: true, speed: 30 },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ paused: true, speed: 30 });
     const bad = await app.inject({ method: 'POST', url: '/api/world/clock', payload: { speed: 7 } });

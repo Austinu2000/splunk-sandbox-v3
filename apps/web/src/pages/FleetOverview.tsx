@@ -54,10 +54,12 @@ export function FleetOverview({ world }: { world: WorldInfo }) {
     [scope.site, scope.serverClass, scope.os, health, q, offset, sort.sort, sort.dir],
   );
 
-  const resetPaging = <T,>(fn: (v: T) => void) => (v: T) => {
-    setOffset(0);
-    fn(v);
-  };
+  const resetPaging =
+    <T,>(fn: (v: T) => void) =>
+    (v: T) => {
+      setOffset(0);
+      fn(v);
+    };
   const updateScope = resetPaging((patch: Partial<typeof scope>) => setScope((s) => ({ ...s, ...patch })));
   const selectHealth = resetPaging(setHealth);
 
@@ -84,7 +86,10 @@ export function FleetOverview({ world }: { world: WorldInfo }) {
       <div className="inputs">
         <label>
           Site
-          <select value={scope.site ?? ''} onChange={(e) => updateScope({ site: e.target.value || undefined })}>
+          <select
+            value={scope.site ?? ''}
+            onChange={(e) => updateScope({ site: e.target.value || undefined })}
+          >
             <option value="">All</option>
             {world.sites.map((x) => (
               <option key={x.id} value={x.id}>

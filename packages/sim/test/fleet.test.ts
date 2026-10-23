@@ -16,7 +16,16 @@ import { HEALTHY, STALE, OFFLINE, DRIFT, WRONG_CLASS } from '../src/fleet/tables
 function fingerprint(world: World): string {
   const h = createHash('sha256');
   const f = world.fleet;
-  for (const col of [f.site, f.serverClass, f.assignedClass, f.hostNum, f.version, f.health, f.healthSince, f.phoneHomeFrozenAt])
+  for (const col of [
+    f.site,
+    f.serverClass,
+    f.assignedClass,
+    f.hostNum,
+    f.version,
+    f.health,
+    f.healthSince,
+    f.phoneHomeFrozenAt,
+  ])
     h.update(new Uint8Array(col.buffer, col.byteOffset, col.byteLength));
   return h.digest('hex');
 }
@@ -84,7 +93,13 @@ describe('fleet generation', () => {
   it('places infrastructure nodes outside the forwarder fleet', () => {
     const roles = big.infra.map((n) => n.role);
     expect(roles.filter((r) => r === 'indexer')).toHaveLength(6);
-    for (const r of ['search_head', 'deployment_server', 'cluster_manager', 'license_manager', 'heavy_forwarder'])
+    for (const r of [
+      'search_head',
+      'deployment_server',
+      'cluster_manager',
+      'license_manager',
+      'heavy_forwarder',
+    ])
       expect(roles).toContain(r);
     expect(matchRows(big, { q: 'idx' })).toHaveLength(0);
   });

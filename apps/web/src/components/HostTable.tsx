@@ -41,7 +41,9 @@ export function HostTable({
     <div>
       <div className="table-meta">
         <span>
-          {total === 0 ? 'No results' : `${fmtInt(offset + 1)}–${fmtInt(last)} of ${fmtInt(total)} forwarders`}
+          {total === 0
+            ? 'No results'
+            : `${fmtInt(offset + 1)}–${fmtInt(last)} of ${fmtInt(total)} forwarders`}
         </span>
         <span className="pager">
           <button disabled={current <= 1} onClick={() => onPage(0)}>
