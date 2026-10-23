@@ -6,7 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 
-**Status:** milestone 2 of 8: Fleet Overview, plus a simulated SSH terminal with a shell emulator and virtual filesystem.
+**Status:** milestone 3 of 8: Fleet Overview, a simulated SSH terminal, and a config layer where edits take effect only after the right restart or reload.
 
 ## Requirements
 
@@ -40,7 +40,8 @@ npm run lint        # ESLint (also blocks child_process, eval, Math.random/Date.
 ```
 packages/shared   types shared by server and web
 packages/sim      the simulated world: seeded RNG, fleet tables, health evolution, queries,
-                  host profiles, log generators, virtual filesystem, shell emulator
+                  host profiles, log generators, virtual filesystem, shell emulator,
+                  .conf parser/btool, running config, config → fleet derivation
 apps/server       Fastify API, ticks the world in wall-clock time
 apps/web          React + Vite UI (Fleet Overview, Terminal)
 scenarios/        incident files (milestone 5+)
@@ -71,7 +72,7 @@ The terminal is an emulator in `packages/sim/src/shell`. Every command is parsed
 
 **Shell:** quotes, `$VAR` (expanded per command, so `$?` works), `~`, globs, `|`, `;`, `&&`, `||`, `>`, `>>`, `<`, `2>`, `2>&1`, aliases, history (↑/↓), tab completion, and Ctrl-C/D/L/U/W/A/E. Command substitution and background jobs are rejected with a bash-style message.
 
-**Commands:** `pwd cd ls cat head tail (-f) less more grep egrep find wc sort uniq cut awk tee echo touch mkdir rm cp mv chmod chown stat vi vim nano ps top df free uptime systemctl ss netstat ping nc ip uname hostname whoami id date env which history export alias type source clear sudo su ssh exit`, plus `splunk status|version|help`.
+**Commands:** `pwd cd ls cat head tail (-f) less more grep egrep find wc sort uniq cut awk tee echo touch mkdir rm cp mv chmod chown stat vi vim nano ps top df free uptime systemctl ss netstat ping nc ip uname hostname whoami id date env which history export alias type source clear sudo su ssh exit`, plus the `splunk` CLI (see below).
 
 **Filesystem:** each host's tree is generated from the seed and hostname (`/etc`, `/home/splunk`, `/var/log`, and `/opt/splunk` or `/opt/splunkforwarder` with `etc/system/{default,local}`, apps, `deployment-apps` on the DS, `peer-apps` on indexers, and `var/log/splunk`). Your edits are stored as an overlay in the world, so they survive logging out and back in. Permissions apply: for example, `splunk` can't write `/etc/hosts` or read `/etc/shadow`.
 
@@ -82,7 +83,39 @@ The terminal is an emulator in `packages/sim/src/shell`. Every command is parsed
 
 `tail -f` prints new lines on every simulation tick. Try it at 30×.
 
-**Not yet:** the config layer (`btool`, effective config, restart/reload effects) is milestone 3. Until then `splunk btool|restart|reload|list ...` reply that they are not simulated yet, and `systemctl restart` as root succeeds without changing state. A PowerShell-style shell for Windows forwarders is deferred to when Windows hosts join the detailed roster.
+A PowerShell-style shell for Windows forwarders is deferred to when Windows hosts join the detailed roster.
+
+## Config layer (milestone 3)
+
+**Files on disk vs. running config.** Saving a `.conf` file changes the disk immediately, and `btool` sees it straight away, as in real Splunk. What splunkd *runs* is a snapshot taken when it last started. Only these change the running config:
+
+| Action | Re-reads |
+|---|---|
+| `splunk restart` / `splunk start`, `sudo systemctl restart Splunkd` / `SplunkForwarder` | everything on that host |
+| `splunk reload deploy-server` (on `ds01`) | `serverclass.conf` and `etc/deployment-apps` |
+
+**Precedence (global context):** `peer-apps/*/local` (indexers) → `system/local` → `apps/*/local` (ASCII order, so `A` beats `a`) → `peer-apps/*/default` → `apps/*/default` → `system/default`. Every stanza inherits `[default]` settings it doesn't set itself.
+
+**`splunk` CLI:**
+
+| Command | Reads |
+|---|---|
+| `splunk btool <conf> list [stanza] [--debug] [--app=X]` | disk; `--debug` prefixes each line with its source file |
+| `splunk btool check` | disk; flags unknown keys (typos) for inputs, outputs, props, server, serverclass, deploymentclient |
+| `splunk start / stop / restart / status / version` | `restart` also runs the conf check and prints any invalid keys |
+| `splunk list forward-server` | running outputs, split into active and inactive by real reachability |
+| `splunk list monitor` | running `inputs.conf` monitor stanzas, expanded against the filesystem |
+| `splunk show deploy-poll` | running `deploymentclient.conf` |
+| `splunk reload deploy-server [-class X]` | deployment server only |
+
+**Config drives the fleet** (`packages/sim/src/derive`). The 35,000 forwarders share the deployment server's config instead of each having their own:
+- Each forwarder is matched against `ds01`'s running `serverclass.conf`. Patterns are case-insensitive; `.` is a literal dot and `*` is a wildcard. A forwarder whose class loses its inputs app shows as *wrong server class* with no assigned class, and its `etc/apps` loses the app.
+- The deployed outputs app decides where each forwarder sends data. A forwarder is *blocked* when none of its servers resolves to a running indexer or heavy forwarder that listens on that port. Listening ports come from the receiver's running `inputs.conf` (`[splunktcp://9997]`).
+- `splunk stop` on a forwarder makes it *offline* at once. On an indexer it removes that indexer as a target.
+- Changes reach each forwarder at its next check-in, so a reload rolls across the fleet over about a minute of sim time. Rows held in a state by config are excluded from background churn.
+- Logs follow the same state. Blocked forwarders log `Unable to resolve host=...` or `Cooked connection to ip=... timed out`. Restarts log shutdown and startup lines. `ds01` logs each reload with the client count per server class, which is the clue for a whitelist typo.
+
+The Fleet Overview, the terminal and the logs all read this one state. For example, stop `idx01` and `idx02` at 30× and the Dallas forwarders turn blocked within a minute.
 
 ## API
 

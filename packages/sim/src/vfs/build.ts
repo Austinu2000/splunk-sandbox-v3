@@ -3,7 +3,6 @@ import { builtinApps, clusterIndexes, clusterIndexesConf, systemDefaults, system
 import { BASTION_USER, DOMAIN, buildFor, sshRoster, splunkVersion, type HostProfile } from '../hosts/profile';
 import {
   appLog,
-  deployedApps,
   messagesLog,
   metricsLog,
   secureLog,
@@ -12,6 +11,7 @@ import {
   type LogSource,
 } from '../logs/sources';
 import { mix32 } from '../rng';
+import { deployedAppFiles, deployedApps } from '../derive/state';
 import type { World } from '../world';
 import { basename, dirname, segments } from './path';
 import { Vfs, type FsDir, type FsFile, type NodeMeta } from './vfs';
@@ -190,8 +190,11 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries):
       own,
     );
   }
-  for (const app of deployedApps(world, p))
-    addApp(world, b, `${S}/etc/apps/${app}`, app, { ...own, mtime: at(12, app.length) });
+  for (const app of deployedApps(world, p)) {
+    // Forwarders get each app as the deployment server currently serves it.
+    const files = deployedAppFiles(world, app);
+    if (files) addFiles(b, `${S}/etc/apps/${app}`, files, { ...own, mtime: at(12, app.length) });
+  }
 
   if (p.role === 'deployment_server')
     for (const app of allDeploymentApps(world))
@@ -247,13 +250,20 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries):
 }
 
 function addApp(world: World, b: TreeBuilder, dir: string, app: string, meta: Partial<NodeMeta>): void {
-  for (const [rel, content] of Object.entries(deploymentAppFiles(world, app)))
-    b.file(`${dir}/${rel}`, content, { ...meta, mode: rel.startsWith('bin/') ? 0o755 : 0o644 });
-  b.file(
-    `${dir}/metadata/local.meta`,
-    `[]\naccess = read : [ * ], write : [ admin ]\nexport = system\n`,
+  addFiles(
+    b,
+    dir,
+    {
+      ...deploymentAppFiles(world, app),
+      'metadata/local.meta': `[]\naccess = read : [ * ], write : [ admin ]\nexport = system\n`,
+    },
     meta,
   );
+}
+
+function addFiles(b: TreeBuilder, dir: string, files: Record<string, string>, meta: Partial<NodeMeta>): void {
+  for (const [rel, content] of Object.entries(files))
+    b.file(`${dir}/${rel}`, content, { ...meta, mode: rel.startsWith('bin/') ? 0o755 : 0o644 });
 }
 
 function buildBastion(world: World, b: TreeBuilder, at: (d: number, s?: number) => number): void {
@@ -389,7 +399,7 @@ export function hostFs(world: World, p: HostProfile, binaries: Binaries): Vfs {
   const signature =
     p.fleetRow === undefined
       ? 'static'
-      : `${world.fleet.assignedClass[p.fleetRow]}:${world.fleet.version[p.fleetRow]}`;
+      : `${world.fleet.assignedClass[p.fleetRow]}:${world.fleet.version[p.fleetRow]}:${world.hosts.confVersion}`;
   const hit = perWorld.get(p.hostname);
   if (hit && hit.signature === signature) return hit.vfs;
   let overlay = world.hosts.fsOverlay.get(p.hostname);

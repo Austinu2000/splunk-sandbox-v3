@@ -1,4 +1,4 @@
-import { outputTargets, resolveHost, splunkdRunning, type HostProfile } from '../../hosts/profile';
+import { resolveHost, splunkdRunning, type HostProfile } from '../../hosts/profile';
 import { clockTime, dateCmd } from '../../logs/format';
 import { mix32, unit } from '../../rng';
 import type { World } from '../../world';
@@ -6,6 +6,8 @@ import { CLEAR_SCREEN } from '../ansi';
 import { pingProgram, pingReply, pingSummary } from '../programs/ping';
 import type { Shell } from '../shell';
 import { fail, ok, type CommandFn } from '../types';
+import { serviceAction } from './splunk';
+import { rowOutputs, targetStatus } from '../../derive/state';
 import { getopt } from './util';
 
 // --- Processes ---
@@ -361,8 +363,12 @@ const systemctl: CommandFn = ({ sh, argv }) => {
       return fail(
         `Failed to ${verb} ${unitName}.service: Interactive authentication required.\nSee system logs and 'systemctl status ${unitName}.service' for details.`,
       );
-    // Service state changes arrive with the config layer in milestone 3.
-    return ok();
+    if (!isSplunk) return ok();
+    if (verb === 'reload')
+      return fail(
+        `Failed to reload ${unitName}.service: Job type reload is not applicable for unit ${unitName}.service.`,
+      );
+    return serviceAction(sh, verb as 'start' | 'stop' | 'restart', true);
   }
   return fail(`Unknown command verb '${verb}'.`);
 };
@@ -373,7 +379,7 @@ interface Socket {
   proto: 'tcp';
   local: string;
   remote: string;
-  state: 'LISTEN' | 'ESTAB';
+  state: 'LISTEN' | 'ESTAB' | 'SYN-SENT';
   proc?: { name: string; pid: number; user: string };
 }
 
@@ -381,8 +387,9 @@ export function listeningPorts(world: World, p: HostProfile): number[] {
   const ports = [22];
   if (p.splunk && splunkdRunning(world, p)) {
     ports.push(p.splunk.mgmtPort);
-    if (p.role === 'indexer') ports.push(9997, 9887);
-    if (p.role === 'heavy_forwarder') ports.push(9997);
+    // Receiving ports come from the running inputs.conf (splunktcp://), so disabling one takes effect on restart.
+    ports.push(...(world.derived.listening.get(p.hostname) ?? []));
+    if (p.role === 'indexer') ports.push(9887);
     if (p.splunk.product === 'enterprise' && p.role !== 'indexer') ports.push(8000);
     if (p.role === 'search_head') ports.push(8191);
   }
@@ -407,16 +414,16 @@ function sockets(sh: Shell): Socket[] {
       proc: sshd,
     });
   if (p.fleetRow !== undefined && splunkdRunning(sh.world, p)) {
-    const cls = sh.world.config.serverClasses[sh.world.fleet.serverClass[p.fleetRow]!]!;
-    const target =
-      outputTargets(sh.world, p.site, cls.outputs)[p.hash % 2] ??
-      outputTargets(sh.world, p.site, cls.outputs)[0];
-    if (target)
+    // Connected to a reachable indexer; when none is reachable the connect attempt sits in SYN-SENT.
+    const targets = rowOutputs(sh.world, p.fleetRow).servers.map((srv) => targetStatus(sh.world, srv));
+    const live = targets.filter((t) => t.reachable);
+    const target = live[p.hash % Math.max(1, live.length)] ?? targets.find((t) => t.host);
+    if (target?.host)
       out.push({
         proto: 'tcp',
         local: `${p.ip}:${40000 + (mix32(p.hash, 3) % 20000)}`,
-        remote: `${target.ip}:9997`,
-        state: 'ESTAB',
+        remote: `${target.host.ip}:${target.port}`,
+        state: target.reachable ? 'ESTAB' : 'SYN-SENT',
         proc: { name: 'splunkd', pid: p.splunk!.pid, user: 'splunk' },
       });
   }
@@ -463,7 +470,7 @@ function netCmd(style: 'ss' | 'netstat'): CommandFn {
         list
           .map(
             (s) =>
-              `tcp        0      0 ${s.local.padEnd(23)} ${s.remote.padEnd(23)} ${(s.state === 'ESTAB' ? 'ESTABLISHED' : 'LISTEN').padEnd(11)} ${procText(s)}`,
+              `tcp        0      0 ${s.local.padEnd(23)} ${s.remote.padEnd(23)} ${(s.state === 'ESTAB' ? 'ESTABLISHED' : s.state === 'SYN-SENT' ? 'SYN_SENT' : 'LISTEN').padEnd(11)} ${procText(s)}`,
           )
           .join('\n') +
         '\n',
@@ -479,10 +486,6 @@ export function rttMs(world: World, from: HostProfile, to: HostProfile, seq: num
   return base * (0.85 + unit(from.hash, to.hash, seq) * 0.4);
 }
 
-export function reachable(_world: World, to: HostProfile): boolean {
-  return !to.infra || to.infra.status !== 'down';
-}
-
 const ping: CommandFn = ({ sh, argv }) => {
   const o = getopt(argv.slice(1), 'cWiw');
   const target = o.operands[0];
@@ -494,11 +497,9 @@ const ping: CommandFn = ({ sh, argv }) => {
     let out = `PING ${to.fqdn} (${to.ip}) 56(84) bytes of data.\n`;
     const rtts: number[] = [];
     for (let seq = 1; seq <= count; seq++) {
-      if (reachable(sh.world, to)) {
-        const r = rttMs(sh.world, sh.host, to, seq);
-        rtts.push(r);
-        out += pingReply(to, seq, r);
-      }
+      const r = rttMs(sh.world, sh.host, to, seq);
+      rtts.push(r);
+      out += pingReply(to, seq, r);
     }
     out += pingSummary(to, count, rtts);
     return { stdout: out, code: rtts.length ? 0 : 1 };
@@ -517,7 +518,6 @@ const nc: CommandFn = ({ sh, argv }) => {
       `${banner}Ncat: Could not resolve hostname "${host}": Name or service not known. QUITTING.`,
       2,
     );
-  if (!reachable(sh.world, to)) return fail(`${banner}Ncat: No route to host.`, 1);
   const open =
     to.os === 'windows'
       ? Number(port) === 8089 && splunkdRunning(sh.world, to)

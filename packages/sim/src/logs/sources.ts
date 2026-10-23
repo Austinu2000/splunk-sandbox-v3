@@ -1,13 +1,8 @@
 import { BLOCKED, HEALTHY, OFFLINE, STALE, WRONG_CLASS } from '../fleet/tables';
 import { throughputKBps } from '../fleet/health';
-import {
-  appsForClient,
-  CLASS_INPUTS,
-  CLASS_LOG_FILE,
-  classSourcetypes,
-  outputGroupName,
-} from '../hosts/apps';
-import { DOMAIN, buildFor, outputTargets, splunkVersion, type HostProfile } from '../hosts/profile';
+import { CLASS_INPUTS, CLASS_LOG_FILE, classSourcetypes, NIX_INPUTS } from '../hosts/apps';
+import { DOMAIN, buildFor, splunkVersion, type HostProfile } from '../hosts/profile';
+import { NO_CLASS, rowOutputs, targetStatus } from '../derive/state';
 import { hashString, mix32, unit } from '../rng';
 import type { World } from '../world';
 import { isoTs, splunkTs, syslogTs } from './format';
@@ -42,19 +37,51 @@ interface Timeline {
 
 function hostTimeline(world: World, p: HostProfile, t0: number): Timeline {
   if (p.fleetRow === undefined) {
-    const s = p.infra?.status === 'up' || !p.infra ? HEALTHY : OFFLINE;
-    return { stateAt: () => s, transitions: [] };
+    // Infrastructure nodes: up unless the user stopped splunkd; transitions come from service events.
+    const events = (world.hosts.services.get(p.hostname)?.events ?? []).filter((e) => e.kind !== 'reload');
+    const transitions = events
+      .filter((e) => e.time > t0)
+      .map((e) => ({
+        time: e.time,
+        from: e.kind === 'stop' ? HEALTHY : OFFLINE,
+        to: e.kind === 'stop' ? OFFLINE : HEALTHY,
+      }));
+    return {
+      transitions,
+      stateAt(t) {
+        const last = events.filter((e) => e.time <= t).at(-1);
+        return last?.kind === 'stop' ? OFFLINE : HEALTHY;
+      },
+    };
   }
   return world.history.timeline(p.fleetRow, t0, world.fleet.health[p.fleetRow]!);
 }
 
 const tid = (p: HostProfile, salt: number) => 1000 + (mix32(p.hash, salt) % 60000);
 
+interface Target {
+  name: string;
+  ip: string | null;
+  port: number;
+  reachable: boolean;
+}
+
+/** The forwarder's running output group and servers, from the derived (running) config. */
 function forwarderTarget(world: World, p: HostProfile) {
   const cls = world.config.serverClasses[world.fleet.serverClass[p.fleetRow!]!]!;
-  const kind = cls.outputs;
-  const targets = outputTargets(world, p.site, kind);
-  return { cls, group: outputGroupName(p.site, kind), targets };
+  const out = rowOutputs(world, p.fleetRow!);
+  const targets: Target[] = out.servers.map((s) => {
+    const t = targetStatus(world, s);
+    return { name: s.split(':')[0]!, ip: t.host?.ip ?? null, port: t.port, reachable: t.reachable };
+  });
+  const live = targets.filter((t) => t.reachable);
+  return { cls, group: out.groups[0] ?? 'default-autolb-group', targets, live };
+}
+
+/** The server a healthy forwarder is connected to during period k (autoLB rotates every 30 s). */
+function connected(f: ReturnType<typeof forwarderTarget>, p: HostProfile, k: number): Target | null {
+  const pool = f.live.length ? f.live : f.targets.filter((t) => t.ip);
+  return pool.length ? pool[(k + (p.hash & 1)) % pool.length]! : null;
 }
 
 function startupLines(world: World, p: HostProfile, t: number): string[] {
@@ -99,7 +126,18 @@ export function splunkdLog(world: World, p: HostProfile): LogSource {
         if (tr.to === OFFLINE) shutdownLines(p, tr.time).forEach((l) => out.push([tr.time, l]));
         if (tr.from === OFFLINE) startupLines(world, p, tr.time).forEach((l) => out.push([tr.time, l]));
         if (tr.to === WRONG_CLASS && p.fleetRow !== undefined) {
-          const assigned = world.config.serverClasses[world.fleet.assignedClass[p.fleetRow]!]!;
+          const assignedIdx = world.fleet.assignedClass[p.fleetRow]!;
+          const thread = `${tid(p, 3)} HttpClientPollingThread_${p.splunk!.guid}`;
+          if (assignedIdx === NO_CLASS) {
+            const own =
+              CLASS_INPUTS[world.config.serverClasses[world.fleet.serverClass[p.fleetRow]!]!.id]!.app;
+            push(
+              tr.time + 2000,
+              `INFO  DeployedApplication [${thread}] - Removing app=${own} at='${p.splunk!.home}/etc/apps/${own}'`,
+            );
+            continue;
+          }
+          const assigned = world.config.serverClasses[assignedIdx]!;
           const app = CLASS_INPUTS[assigned.id]!.app;
           push(
             tr.time + 2000,
@@ -112,8 +150,22 @@ export function splunkdLog(world: World, p: HostProfile): LogSource {
         }
       }
 
+      for (const e of world.hosts.services.get(p.hostname)?.events ?? []) {
+        if (e.kind !== 'reload' || e.time <= t0 || e.time > t1) continue;
+        const thread = `${tid(p, 9)} TcpChannelThread`;
+        push(
+          e.time,
+          `INFO  DeploymentServer [${thread}] - Reload requested (splunk reload deploy-server${e.detail ? ` -class ${e.detail}` : ''}); re-reading serverclass.conf and ${p.splunk!.home}/etc/deployment-apps`,
+        );
+        for (const [cls, n] of Object.entries(e.matches ?? {}))
+          push(
+            e.time + 1,
+            `INFO  DeploymentServer [${thread}] - serverClass=${cls} matches ${n} client${n === 1 ? '' : 's'}`,
+          );
+      }
+
       if (p.fleetRow !== undefined) forwarderSplunkd(world, p, tl, t0, t1, push);
-      else enterpriseSplunkd(world, p, t0, t1, push);
+      else enterpriseSplunkd(world, p, tl, t0, t1, push);
       return sorted(out);
     },
   };
@@ -127,28 +179,44 @@ function forwarderSplunkd(
   t1: number,
   push: (t: number, line: string) => void,
 ): void {
-  const { group, targets } = forwarderTarget(world, p);
+  const fwd = forwarderTarget(world, p);
+  const { group } = fwd;
   const phase = p.hash % 30_000;
 
   periodic(t0, t1, 30_000, phase, (t, k) => {
     const state = tl.stateAt(t);
     if (state === OFFLINE) return;
-    const target = targets[(k + (p.hash & 1)) % targets.length]!;
+    const target = connected(fwd, p, k);
     if (state === BLOCKED) {
       const since = tl.transitions.filter((x) => x.to === BLOCKED && x.time <= t).at(-1)?.time;
       const secs = since === undefined ? 30 + (k % 50) * 30 : Math.round((t - since) / 1000);
+      // When the running outputs can't reach anything, say why for each configured server.
+      if (!fwd.live.length) {
+        if (!fwd.targets.length)
+          push(
+            t - 300,
+            `WARN  TcpOutputProc [${tid(p, 4)} TcpOutEloop] - No servers are configured for the default output group; events will queue until outputs.conf is fixed.`,
+          );
+        for (const tg of fwd.targets)
+          push(
+            t - 200,
+            tg.ip
+              ? `WARN  AutoLoadBalancedConnectionStrategy [${tid(p, 4)} TcpOutEloop] - Cooked connection to ip=${tg.ip}:${tg.port} timed out`
+              : `ERROR TcpOutputProc [${tid(p, 4)} TcpOutEloop] - Unable to resolve host='${tg.name}'; skipping server ${tg.name}:${tg.port}`,
+          );
+      }
       push(
         t,
-        `WARN  TcpOutputProc [${tid(p, 4)} TcpOutEloop] - The TCP output processor has paused the data flow. Forwarding to host_dest=${target.ip} inside output group ${group} from host_src=${p.hostname} has been blocked for blocked_seconds=${secs}. This can stall the data flow towards indexing and other network outputs. Review the receiving system's health in the Splunk Monitoring Console. It is probably not accepting data.`,
+        `WARN  TcpOutputProc [${tid(p, 4)} TcpOutEloop] - The TCP output processor has paused the data flow. Forwarding to host_dest=${target?.ip ?? fwd.targets[0]?.name ?? 'none'} inside output group ${group} from host_src=${p.hostname} has been blocked for blocked_seconds=${secs}. This can stall the data flow towards indexing and other network outputs. Review the receiving system's health in the Splunk Monitoring Console. It is probably not accepting data.`,
       );
       push(
         t + 150,
         `WARN  TailReader [${tid(p, 5)} tailreader0] - Could not send data to output queue (parsingQueue), retrying...`,
       );
-    } else {
+    } else if (target) {
       push(
         t + ms(p, t, 1),
-        `INFO  TcpOutputProc [${tid(p, 4)} TcpOutEloop] - Found currently active indexer. Connected to idx=${target.ip}:9997:0, reuse=1.`,
+        `INFO  TcpOutputProc [${tid(p, 4)} TcpOutEloop] - Found currently active indexer. Connected to idx=${target.ip}:${target.port}:0, reuse=1.`,
       );
     }
   });
@@ -181,19 +249,23 @@ function forwarderSplunkd(
 }
 
 function monitoredPaths(world: World, p: HostProfile): string[] {
-  const file = CLASS_LOG_FILE[world.config.serverClasses[world.fleet.assignedClass[p.fleetRow!]!]!.id];
+  const assigned = world.fleet.assignedClass[p.fleetRow!]!;
+  if (assigned === NO_CLASS) return [];
+  const file = CLASS_LOG_FILE[world.config.serverClasses[assigned]!.id];
   return file ? [file] : [];
 }
 
 function enterpriseSplunkd(
   world: World,
   p: HostProfile,
+  tl: Timeline,
   t0: number,
   t1: number,
   push: (t: number, line: string) => void,
 ): void {
   const role = p.role;
   periodic(t0, t1, 60_000, p.hash % 60_000, (t, k) => {
+    if (tl.stateAt(t) === OFFLINE) return;
     const r = unit(p.hash, k, 0x21);
     if (role === 'indexer') {
       const site = world.config.sites.find((s) => s.id === p.site)!;
@@ -267,7 +339,8 @@ function forwarderMetrics(
   push: (l: string) => void,
 ) {
   const row = p.fleetRow!;
-  const { cls, group, targets } = forwarderTarget(world, p);
+  const fwd = forwarderTarget(world, p);
+  const { cls, group } = fwd;
   const blocked = state === BLOCKED;
   const kbps = throughputKBps(world, row, t, state);
   const eps = Math.round(kbps * 4.2 * 10) / 10;
@@ -278,13 +351,17 @@ function forwarderMetrics(
   );
   push(queueLine('parsingqueue', 512, fill, blocked));
   push(queueLine(`tcpout_${group}`, 500, fill, blocked));
-  if (!blocked) {
-    const target = targets[(k + (p.hash & 1)) % targets.length]!;
+  const target = connected(fwd, p, k);
+  if (!blocked && target) {
     push(
-      `group=tcpout_connections, name=${group}:${target.ip}:9997:0, sourcePort=${40000 + (p.hash % 20000)}, destIp=${target.ip}, destPort=9997, _tcp_Bps=${Math.round(kbps * 1024)}, _tcp_KBps=${kbps.toFixed(2)}, _tcp_avg_thruput=${(cls.baseThroughputKBps * 0.98).toFixed(2)}, _tcp_Kprocessed=${Math.round(kbps * 30)}, _tcp_eps=${(eps / 4).toFixed(2)}, kb=${(kbps * 30).toFixed(2)}`,
+      `group=tcpout_connections, name=${group}:${target.ip}:${target.port}:0, sourcePort=${40000 + (p.hash % 20000)}, destIp=${target.ip}, destPort=${target.port}, _tcp_Bps=${Math.round(kbps * 1024)}, _tcp_KBps=${kbps.toFixed(2)}, _tcp_avg_thruput=${(cls.baseThroughputKBps * 0.98).toFixed(2)}, _tcp_Kprocessed=${Math.round(kbps * 30)}, _tcp_eps=${(eps / 4).toFixed(2)}, kb=${(kbps * 30).toFixed(2)}`,
     );
   }
-  const sts = classSourcetypes(world.config.serverClasses[world.fleet.assignedClass[row]!]!.id, cls.os);
+  const assigned = world.fleet.assignedClass[row]!;
+  const sts =
+    assigned === NO_CLASS
+      ? NIX_INPUTS.map((i) => i.sourcetype)
+      : classSourcetypes(world.config.serverClasses[assigned]!.id, cls.os);
   sts.forEach((st, i) => {
     const share = i === 0 ? 0.7 : 0.3 / Math.max(1, sts.length - 1);
     const sk = kbps * share;
@@ -437,11 +514,4 @@ export function smallLog(world: World, p: HostProfile, kind: 'utility' | 'audit'
       return out;
     },
   };
-}
-
-/** Apps deployed on a forwarder right now, from its assigned server class. */
-export function deployedApps(world: World, p: HostProfile): string[] {
-  if (p.fleetRow === undefined) return [];
-  const cls = world.config.serverClasses[world.fleet.assignedClass[p.fleetRow]!]!;
-  return appsForClient(world, p.site, cls.id);
 }

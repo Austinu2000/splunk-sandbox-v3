@@ -52,7 +52,14 @@ function pickApprovedVersion(world: World, rng: Rng): number {
  * Applies the column changes for a row entering `state` at time `at`.
  * Does not touch aggregates or history; use setHealth for live transitions.
  */
-export function enterState(world: World, row: number, state: number, at: number, rng: Rng): void {
+export function enterState(
+  world: World,
+  row: number,
+  state: number,
+  at: number,
+  rng: Rng,
+  assigned?: number,
+): void {
   const f = world.fleet;
   const prev = f.health[row]!;
   // Undo the previous state's side effects.
@@ -65,7 +72,7 @@ export function enterState(world: World, row: number, state: number, at: number,
     f.version[row] = world.config.approvedVersions.length + rng.int(world.config.driftVersions.length);
   } else if (state === WRONG_CLASS) {
     const classes = world.config.serverClasses.length;
-    f.assignedClass[row] = (f.serverClass[row]! + 1 + rng.int(classes - 1)) % classes;
+    f.assignedClass[row] = assigned ?? (f.serverClass[row]! + 1 + rng.int(classes - 1)) % classes;
   } else if (isPhoneHomeFrozen(state) && !isPhoneHomeFrozen(prev)) {
     f.phoneHomeFrozenAt[row] = liveLastPhoneHome(world, row, at);
   }
@@ -75,11 +82,18 @@ export function enterState(world: World, row: number, state: number, at: number,
 }
 
 /** Live transition: updates columns, aggregates and history together so they never disagree. */
-export function setHealth(world: World, row: number, state: number, at: number, rng: Rng): void {
+export function setHealth(
+  world: World,
+  row: number,
+  state: number,
+  at: number,
+  rng: Rng,
+  assigned?: number,
+): void {
   const f = world.fleet;
   const prev = f.health[row]!;
   if (prev === state) return;
-  enterState(world, row, state, at, rng);
+  enterState(world, row, state, at, rng, assigned);
   world.aggregates.add(f.site[row]!, f.serverClass[row]!, prev, -1);
   world.aggregates.add(f.site[row]!, f.serverClass[row]!, state, 1);
   world.history.push(at, row, prev, state);
@@ -102,8 +116,11 @@ export function backgroundRates(world: World): { pFail: number; pRecover: number
 export function evolveFleet(world: World, rng: Rng, at: number): void {
   const { pFail, pRecover } = backgroundRates(world);
   const health = world.fleet.health;
+  const constrained = world.derived?.constrained;
   for (let row = 0; row < world.fleet.size; row++) {
     const draw = rng.next();
+    // Rows held in a state by running config are not subject to background churn.
+    if (constrained?.[row]) continue;
     if (health[row] === HEALTHY) {
       if (draw < pFail) setHealth(world, row, pickUnhealthyState(world, rng), at, rng);
     } else if (draw < pRecover) {

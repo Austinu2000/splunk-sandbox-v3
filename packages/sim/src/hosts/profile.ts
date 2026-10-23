@@ -213,6 +213,7 @@ function buildProfile(world: World, name: string): HostProfile | null {
 /** Whether splunkd is running on the host right now (from fleet health or infra status). */
 export function splunkdRunning(world: World, p: HostProfile): boolean {
   if (!p.splunk) return false;
+  if (world.hosts.services.get(p.hostname)?.running === false) return false;
   if (p.fleetRow !== undefined) return world.fleet.health[p.fleetRow] !== OFFLINE;
   return p.infra?.status === 'up';
 }

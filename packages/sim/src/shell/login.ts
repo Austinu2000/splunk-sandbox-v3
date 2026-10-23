@@ -49,8 +49,6 @@ export function sshConnect(from: Shell, target: string, user: string): SshOutcom
     return { error: `ssh: Could not resolve hostname ${target}: Name or service not known\n`, code: 255 };
   if (p.os === 'windows')
     return { error: `ssh: connect to host ${p.hostname} port 22: Connection refused\n`, code: 255 };
-  if (p.infra && p.infra.status === 'down')
-    return { error: `ssh: connect to host ${p.hostname} port 22: No route to host\n`, code: 255 };
   const methods = 'publickey,gssapi-keyex,gssapi-with-mic';
   // Only the bastion holds keys, and only the splunk account accepts them.
   if (from.host.hostname !== BASTION || user !== 'splunk' || p.hostname === BASTION)

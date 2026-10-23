@@ -1,5 +1,5 @@
 import type { HostProfile } from '../../hosts/profile';
-import { reachable, rttMs } from '../commands/system';
+import { rttMs } from '../commands/system';
 import type { Shell } from '../shell';
 import type { Program, ProgramHost } from '../types';
 
@@ -27,11 +27,9 @@ export function pingProgram(sh: Shell, to: HostProfile): Program {
   const rtts: number[] = [];
   const next = () => {
     seq++;
-    if (reachable(sh.world, to)) {
-      const r = rttMs(sh.world, sh.host, to, seq);
-      rtts.push(r);
-      host.write(pingReply(to, seq, r));
-    }
+    const r = rttMs(sh.world, sh.host, to, seq);
+    rtts.push(r);
+    host.write(pingReply(to, seq, r));
     host.schedule(1000, next);
   };
   return {

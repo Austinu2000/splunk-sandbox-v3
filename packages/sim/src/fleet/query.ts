@@ -11,6 +11,7 @@ import {
   type HostSortKey,
 } from '@sandbox/shared';
 import type { World } from '../world';
+import { NO_CLASS, rowOutputs } from '../derive/state';
 import { isPhoneHomeFrozen, lastPhoneHome, queueFillPct, throughputKBps } from './health';
 import { HEALTH_CODE, WRONG_CLASS } from './tables';
 
@@ -30,10 +31,9 @@ export function ipAddress(world: World, row: number): string {
   return `10.${subnet}.${(n >> 8) & 255}.${n & 255}`;
 }
 
+/** The forwarder's running output group (from its deployed or local outputs.conf). */
 export function outputGroup(world: World, row: number): string {
-  const site = world.config.sites[world.fleet.site[row]!]!.id;
-  const cls = world.config.serverClasses[world.fleet.serverClass[row]!]!;
-  return `${site}_${cls.outputs === 'hf' ? 'hf' : 'indexers'}`;
+  return rowOutputs(world, row).groups[0] ?? '(none)';
 }
 
 function deploymentClientStatus(health: number): DeploymentClientStatus {
@@ -53,7 +53,8 @@ export function forwarderRecord(world: World, row: number): ForwarderRecord {
     os: cls.os,
     site: cfg.sites[f.site[row]!]!.id,
     serverClass: cls.id,
-    assignedServerClass: cfg.serverClasses[f.assignedClass[row]!]!.id,
+    assignedServerClass:
+      f.assignedClass[row] === NO_CLASS ? '(none)' : cfg.serverClasses[f.assignedClass[row]!]!.id,
     version: world.versions[f.version[row]!]!,
     outputGroup: outputGroup(world, row),
     health: HEALTH_STATES[f.health[row]!]!,

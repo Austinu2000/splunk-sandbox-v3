@@ -7,6 +7,8 @@ import { HealthHistory } from './fleet/history';
 import { allocFleet, type FleetTables } from './fleet/tables';
 import { generateInfra, type InfraNode } from './infra';
 import type { OverlayEntry } from './vfs/vfs';
+import type { ServiceState } from './hosts/running';
+import { applyConstraints, initDerived, type DerivedState } from './derive/state';
 import { hashString, Rng } from './rng';
 
 export interface WorldClock {
@@ -30,6 +32,8 @@ export interface World {
   /** Version strings indexed by fleet.version: approved versions first, then drift versions. */
   versions: string[];
   hosts: HostRuntime;
+  /** Fleet behaviour derived from running config (deployment server mappings, output reachability). */
+  derived: DerivedState;
 }
 
 /** Per-host state created by user activity. Generated content is never stored, only changes to it. */
@@ -38,6 +42,12 @@ export interface HostRuntime {
   fsOverlay: Map<string, Map<string, OverlayEntry>>;
   /** hostname → sim time of the user's last SSH login. */
   lastLogin: Map<string, number>;
+  /** hostname → overlay as splunkd last loaded it (at start, or reload for the deployment server). */
+  restartSnapshot: Map<string, Map<string, OverlayEntry>>;
+  /** hostname → splunkd service state; hosts never touched are running. */
+  services: Map<string, ServiceState>;
+  /** Bumped whenever any running config changes; caches key on it. */
+  confVersion: number;
 }
 
 export function createWorld(overrides: Partial<WorldConfig> = {}): World {
@@ -53,11 +63,19 @@ export function createWorld(overrides: Partial<WorldConfig> = {}): World {
     history: new HealthHistory(1),
     infra: generateInfra(config),
     versions: [...config.approvedVersions.map((v) => v.version), ...config.driftVersions],
-    hosts: { fsOverlay: new Map(), lastLogin: new Map() },
+    hosts: {
+      fsOverlay: new Map(),
+      lastLogin: new Map(),
+      restartSnapshot: new Map(),
+      services: new Map(),
+      confVersion: 0,
+    },
+    derived: null as unknown as DerivedState,
   };
   generateFleet(world);
   world.aggregates = FleetAggregates.fromScan(world.fleet, config.sites.length, config.serverClasses.length);
   world.history = new HealthHistory(historyCapacity(world));
+  world.derived = initDerived(world);
   return world;
 }
 
@@ -74,9 +92,12 @@ export function tickWorld(world: World, n = 1): void {
   for (let k = 0; k < n; k++) {
     const tick = world.clock.tick + 1;
     const now = world.config.startTime + tick * world.config.tickMs;
+    const prev = world.clock.now;
     world.clock.tick = tick;
     world.clock.now = now;
-    evolveFleet(world, world.rng.fork('tick', tick), now);
+    const rng = world.rng.fork('tick', tick);
+    evolveFleet(world, rng, now);
+    applyConstraints(world, rng.fork('constraints'), prev, now);
     world.history.prune(now - world.config.historyRetentionMs);
   }
 }
