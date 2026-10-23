@@ -1,0 +1,43 @@
+id: input-permissions
+title: MySQL logs from a Dallas database server are missing
+summary: >-
+  During a MySQL upgrade, /var/log/mysql/mysqld.log on dal-db-0001 was recreated as mysql:mysql 0600.
+  The forwarder runs as the splunk user, cannot read the file, and logs a TailReader permission warning.
+topics: [inputs, linux, forwarders]
+difficulty: easy
+trigger: { onDemand: true }
+ticket:
+  requester: Sam, Database Team
+  persona: methodical
+  urgency: medium
+  text: >-
+    We upgraded MySQL on dal-db-0001 yesterday. The database is healthy, but its mysqld logs stopped
+    appearing in Splunk. The other database servers are fine. Syslog from the same host still arrives.
+changes:
+  - host: dal-db-0001
+    file: /var/log/mysql/mysqld.log
+    mode: '0600'
+    owner: mysql
+    group: mysql
+clues:
+  [
+    'dal-db-0001: ls -l /var/log/mysql',
+    'dal-db-0001: grep TailReader /opt/splunkforwarder/var/log/splunk/splunkd.log',
+    'index=_internal host=dal-db-0001 component=TailReader',
+  ]
+redHerrings:
+  - host: dal-db-0001
+    file: messages
+    component: mysqld
+    message: '[Warning] [MY-010068] [Server] CA certificate ca.pem is self signed.'
+    everyMinutes: 7
+  - host: dal-db-0001
+    file: splunkd
+    level: WARN
+    component: ExecProcessor
+    message: 'message from "/opt/splunkforwarder/etc/apps/Splunk_TA_nix/bin/vmstat.sh" Not all memory statistics are available'
+    everyMinutes: 5
+# The forwarder is reading the file again, whether by mode, group or ownership.
+fixChecks:
+  collecting: { host: dal-db-0001, source: /var/log/mysql/mysqld.log }
+recovery: { seconds: 30 }

@@ -1,0 +1,46 @@
+id: license-noisy-debug
+title: License usage is heading for a violation
+summary: >-
+  Someone added [monitor:///var/log/app/debug.log] (sourcetype app:debug) to org_linux_app_inputs/local
+  on ds01 and reloaded the deployment server. Every linux_app forwarder now ships its DEBUG request dumps,
+  and the projected daily volume goes well past the license quota.
+topics: [licensing, inputs, deployment-server]
+difficulty: medium
+trigger: { onDemand: true }
+ticket:
+  requester: Dana, IT Finance
+  persona: concerned
+  urgency: high
+  text: >-
+    We got an automated alert that today's Splunk license usage will exceed our quota. Another violation
+    this month means a call with the vendor. Nobody on my side changed anything. Can you find out what's
+    eating the license and get it back under control?
+changes:
+  - host: ds01
+    path: /opt/splunk/etc/deployment-apps/org_linux_app_inputs/local/inputs.conf
+    stanza: 'monitor:///var/log/app/debug.log'
+    set: { sourcetype: 'app:debug', index: app, disabled: '0' }
+    apply: deploy-server
+clues:
+  [
+    'Monitoring Console > License usage, split by sourcetype',
+    'index=_internal source=*license_usage.log type=Usage | stats sum(b) by st',
+    'ds01: splunk btool inputs list --app=org_linux_app_inputs --debug (on the deployment apps)',
+  ]
+redHerrings:
+  - host: lm01
+    file: splunkd
+    level: WARN
+    component: LMStackMgr
+    message: 'License expiration warning: license with label="Splunk Enterprise Term" (guid=7F3C1A0E) expires in 61 days'
+    everyMinutes: 8
+  - host: idx03
+    file: splunkd
+    level: WARN
+    component: TailReader
+    message: 'Could not send data to output queue (parsingQueue), retrying...'
+    everyMinutes: 11
+# Back under 90% of the quota projected for the day: stop collecting the file, or drop it at the indexers.
+fixChecks:
+  license: { maxProjectedPct: 90 }
+recovery: { seconds: 60 }

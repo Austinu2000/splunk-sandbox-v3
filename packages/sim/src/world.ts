@@ -11,6 +11,7 @@ import { updateScenarios, type ScenarioState } from './scenario/engine';
 import type { ServiceState } from './hosts/running';
 import { applyConstraints, initDerived, type DerivedState } from './derive/state';
 import { hashString, Rng } from './rng';
+import { installLicenseHooks, recordLicense } from './ingest/license';
 
 export interface WorldClock {
   /** Sim epoch ms. Always startTime + tick * tickMs. */
@@ -54,6 +55,7 @@ export interface HostRuntime {
 }
 
 export function createWorld(overrides: Partial<WorldConfig> = {}): World {
+  installLicenseHooks();
   const config = defaultWorldConfig(overrides);
   validateConfig(config);
   const world: World = {
@@ -103,6 +105,7 @@ export function tickWorld(world: World, n = 1): void {
     const rng = world.rng.fork('tick', tick);
     evolveFleet(world, rng, now);
     applyConstraints(world, rng.fork('constraints'), prev, now);
+    if (Math.floor(prev / 60_000) !== Math.floor(now / 60_000)) recordLicense(world);
     updateScenarios(world);
     world.history.prune(now - world.config.historyRetentionMs);
   }

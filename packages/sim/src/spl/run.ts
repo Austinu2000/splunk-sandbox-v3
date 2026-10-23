@@ -129,7 +129,8 @@ function execute(world: World, req: SearchRequest, limits: typeof LIMITS, out: S
       });
     earliest = now - retention;
   }
-  latest = Math.min(latest, now);
+  // Future events exist only when timestamps were extracted wrongly; allow looking 2 days ahead (MAX_DAYS_HENCE).
+  latest = Math.min(latest, now + 2 * 86_400_000);
   if (earliest >= latest) throw new SplError('The earliest time is after the latest time.');
   out.earliest = earliest;
   out.latest = latest;
@@ -218,7 +219,9 @@ function execute(world: World, req: SearchRequest, limits: typeof LIMITS, out: S
     out.fields = summarizeFields(rows.slice(0, 2000));
   } else {
     out.results = rows;
-    out.columns = namesOf(rows, 500).filter((c) => !c.startsWith('_') || c === '_time');
+    // Internal fields stay hidden on event rows, but a command that built new rows (table, stats)
+    // chose its fields explicitly, so keep them.
+    out.columns = namesOf(rows, 500).filter((c) => !c.startsWith('_') || c === '_time' || !rows[0]?.event);
   }
 }
 

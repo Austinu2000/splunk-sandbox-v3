@@ -6,10 +6,21 @@ import { FleetOverview } from './pages/FleetOverview';
 import { SearchPage } from './pages/SearchPage';
 import { TerminalPage } from './pages/TerminalPage';
 import { usePoll } from './usePoll';
+import { MonitoringConsole, MC_TABS } from './pages/MonitoringConsole';
+import { ForwarderManagement, DS_TABS, type DsTab } from './pages/ForwarderManagement';
+import type { McView } from '@sandbox/shared';
+
+/** The sub-view in #/route/<sub>, if it is one of `allowed`. */
+function subRoute<T extends string>(allowed: readonly T[], fallback: T): T {
+  const sub = window.location.hash.split('/')[2] as T | undefined;
+  return sub && allowed.includes(sub) ? sub : fallback;
+}
 
 function routeFromHash(): Route {
   const h = window.location.hash;
   if (h === '#/tickets') return 'tickets';
+  if (h.startsWith('#/monitoring')) return 'monitoring';
+  if (h.startsWith('#/forwarders')) return 'forwarders';
   if (h === '#/terminal') return 'terminal';
   if (h.startsWith('#/search')) return 'search';
   return 'fleet';
@@ -18,12 +29,16 @@ function routeFromHash(): Route {
 export function App() {
   const world = usePoll(() => api.world(), [], 2000);
   const [route, setRoute] = useState<Route>(routeFromHash);
+  const [hash, setHash] = useState(window.location.hash);
   // The terminal mounts on first visit and then stays mounted, so its session survives navigation.
   const [terminalOpened, setTerminalOpened] = useState(route === 'terminal');
   const [searchOpened, setSearchOpened] = useState(route === 'search');
 
   useEffect(() => {
-    const onHash = () => setRoute(routeFromHash());
+    const onHash = () => {
+      setRoute(routeFromHash());
+      setHash(window.location.hash);
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -49,6 +64,24 @@ export function App() {
       )}
       {world.data && route === 'fleet' && <FleetOverview world={world.data} />}
       {world.data && route === 'tickets' && <TicketsPage world={world.data} />}
+      {world.data && route === 'monitoring' && (
+        <MonitoringConsole
+          key={hash}
+          view={subRoute<McView>(
+            MC_TABS.map((t) => t.view),
+            'indexing',
+          )}
+        />
+      )}
+      {world.data && route === 'forwarders' && (
+        <ForwarderManagement
+          tab={subRoute<DsTab>(
+            DS_TABS.map((t) => t.tab),
+            'clients',
+          )}
+          now={world.data.now}
+        />
+      )}
       {terminalOpened && <TerminalPage visible={route === 'terminal'} />}
       {searchOpened && <SearchPage visible={route === 'search'} />}
     </>

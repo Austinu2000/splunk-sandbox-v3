@@ -1,11 +1,14 @@
 import { BLOCKED, HEALTHY, OFFLINE, STALE, WRONG_CLASS } from '../fleet/tables';
 import { throughputKBps } from '../fleet/health';
-import { CLASS_INPUTS, CLASS_LOG_FILE, classSourcetypes, NIX_INPUTS } from '../hosts/apps';
+import { CLASS_INPUTS } from '../hosts/apps';
+import { EXTRA_KBPS, forwarderInputs, type ForwarderInputs } from '../hosts/inputs';
 import { DOMAIN, buildFor, splunkVersion, type HostProfile } from '../hosts/profile';
 import { NO_CLASS, rowOutputs, targetStatus, parsingQueueBlocked, parsingQueueKB } from '../derive/state';
 import { hashString, mix32, unit } from '../rng';
 import type { World } from '../world';
 import { isoTs, splunkTs, syslogTs } from './format';
+import { SKIP_REASON, simulateScheduler } from '../scheduler';
+import { bytesBetween, licenseQuotaBytes, licenseRatesAt, LICENSE_POOL, totalRate } from '../ingest/license';
 
 /** One log event: its time and raw text (multi-line for Windows events). */
 export type Entry = [time: number, raw: string];
@@ -340,11 +343,19 @@ function forwarderSplunkd(
     );
   });
 
-  // Ordinary noise: file rotation picked up by the tailing processor.
-  const files = ['/var/log/messages', '/var/log/secure', ...monitoredPaths(world, p)];
+  // Ordinary noise: file rotation picked up by the tailing processor. Unreadable monitored files
+  // produce a permissions warning every minute, as TailReader keeps retrying them.
+  const inputs = forwarderInputs(world, p);
+  const files = inputs.collected.map((c) => c.source).filter((s) => s.startsWith('/'));
   periodic(t0, t1, 60_000, p.hash % 60_000, (t, k) => {
     const st = tl.stateAt(t);
-    if (st === OFFLINE || st === BLOCKED) return;
+    if (st === OFFLINE) return;
+    for (const f of inputs.unreadable)
+      push(
+        t + 300,
+        `WARN  TailReader [${tid(p, 5)} tailreader0] - Insufficient permissions to read file='${f}' (hint: Permission denied , UID: 1001, GID: 1001).`,
+      );
+    if (st === BLOCKED || !files.length) return;
     if (unit(p.hash, k, 0x11) < 0.03) {
       const f = files[mix32(p.hash, k) % files.length]!;
       push(
@@ -353,13 +364,6 @@ function forwarderSplunkd(
       );
     }
   });
-}
-
-function monitoredPaths(world: World, p: HostProfile): string[] {
-  const assigned = world.fleet.assignedClass[p.fleetRow!]!;
-  if (assigned === NO_CLASS) return [];
-  const file = CLASS_LOG_FILE[world.config.serverClasses[assigned]!.id];
-  return file ? [file] : [];
 }
 
 function enterpriseSplunkd(
@@ -390,6 +394,17 @@ function enterpriseSplunkd(
           `INFO  HotBucketRoller [${tid(p, 8)} indexerPipe_0] - finished moving hot to warm bucket=/opt/splunk/var/lib/splunk/${idx}/db/hot_v1_${n} idx=${idx} from=hot_v1_${n} to=db_${Math.floor(t / 1000)}_${Math.floor(t / 1000) - 86_000}_${n}_${p.splunk!.guid} size=786432000 caller=size_exceeded _maxHotBucketSize=786432000 (750MB), bucketSize=786436096 (750MB)`,
         );
       }
+    } else if (role === 'license_manager') {
+      // Hourly: warn when a full day at the current rate would exceed the quota.
+      if (k % 60 === 5) {
+        const quota = licenseQuotaBytes(world);
+        const projected = totalRate(licenseRatesAt(world, t)) * 86_400;
+        if (projected > quota)
+          push(
+            t + 200,
+            `WARN  LicenseUsage [${tid(p, 12)} LMTrackerExecutorWorker-0] - Daily indexing volume is projected to exceed the license quota: projected=${Math.round(projected / 1024 ** 3)} GB quota=${Math.round(quota / 1024 ** 3)} GB (${Math.round((projected / quota) * 100)}%) pool=${LICENSE_POOL}`,
+          );
+      }
     } else if (role === 'deployment_server') {
       if (r < 0.25) {
         const row = mix32(p.hash, k, 5) % world.fleet.size;
@@ -418,12 +433,13 @@ export function metricsLog(world: World, p: HostProfile): LogSource {
     const tl = hostTimeline(world, p, t0);
     const phase = mix32(p.hash, 0x33) % 30_000;
     const fwd = p.fleetRow !== undefined ? forwarderTarget(world, p) : null;
+    const inputs = fwd ? forwarderInputs(world, p) : null;
     periodic(t0, t1, 30_000, phase, (t, k) => {
       const state = tl.stateAt(t);
       if (state === OFFLINE) return;
       const pre = `${splunkTs(t)} INFO  Metrics - `;
       const push = (l: string) => out.push([t, pre + l]);
-      if (fwd) forwarderMetrics(world, p, fwd, t, k, state, push);
+      if (fwd) forwarderMetrics(world, p, fwd, inputs!, t, k, state, push);
       else enterpriseMetrics(world, p, t, k, push);
     });
     return out;
@@ -448,15 +464,17 @@ function forwarderMetrics(
   world: World,
   p: HostProfile,
   fwd: ReturnType<typeof forwarderTarget>,
+  inputs: ForwarderInputs,
   t: number,
   k: number,
   state: number,
   push: (l: string) => void,
 ) {
-  const row = p.fleetRow!;
   const { cls, group } = fwd;
   const blocked = state === BLOCKED;
-  const kbps = throughputKBps(world, row, t, state);
+  const rates = sourcetypeRates(world, p, t, state, inputs);
+  const total = rates.reduce((s, r) => s + r.kbps, 0);
+  const kbps = Math.round((total || throughputKBps(world, p.fleetRow!, t, state)) * 10) / 10;
   const eps = Math.round(kbps * 4.2 * 10) / 10;
   const uptimeS = Math.max(1, (t - p.bootTime) / 1000);
   const fill = blocked ? 1 : unit(p.hash, k, 0x41) * 0.08;
@@ -471,18 +489,50 @@ function forwarderMetrics(
       `group=tcpout_connections, name=${group}:${target.ip}:${target.port}:0, sourcePort=${40000 + (p.hash % 20000)}, destIp=${target.ip}, destPort=${target.port}, _tcp_Bps=${Math.round(kbps * 1024)}, _tcp_KBps=${kbps.toFixed(2)}, _tcp_avg_thruput=${(cls.baseThroughputKBps * 0.98).toFixed(2)}, _tcp_Kprocessed=${Math.round(kbps * 30)}, _tcp_eps=${(eps / 4).toFixed(2)}, kb=${(kbps * 30).toFixed(2)}`,
     );
   }
-  const assigned = world.fleet.assignedClass[row]!;
-  const sts =
-    assigned === NO_CLASS
-      ? NIX_INPUTS.map((i) => i.sourcetype)
-      : classSourcetypes(world.config.serverClasses[assigned]!.id, cls.os);
-  sts.forEach((st, i) => {
-    const share = i === 0 ? 0.7 : 0.3 / Math.max(1, sts.length - 1);
-    const sk = kbps * share;
+  rates.forEach(({ sourcetype: st, kbps: sk }, i) => {
+    const share = total ? sk / total : 0;
     push(
       `group=per_sourcetype_thruput, series="${st}", kbps=${sk.toFixed(3)}, eps=${(eps * share).toFixed(3)}, kb=${(sk * 30).toFixed(3)}, ev=${Math.round(eps * share * 30)}, avg_age=${(unit(p.hash, k, i) * 2).toFixed(3)}, max_age=${1 + (mix32(p.hash, k, i) % 4)}`,
     );
   });
+}
+
+/**
+ * KB/s per collected sourcetype: the host's base rate split across what it collects (the main
+ * input takes 70%), plus fixed extra volume for unusually noisy sourcetypes. Zero while blocked
+ * or offline. Metrics, the license model and the Monitoring Console all read this.
+ */
+export function sourcetypeRates(
+  world: World,
+  p: HostProfile,
+  t: number,
+  state: number,
+  inputs: ForwarderInputs = forwarderInputs(world, p),
+): { sourcetype: string; index: string; kbps: number }[] {
+  if (state === BLOCKED || state === OFFLINE) return [];
+  const base = throughputKBps(world, p.fleetRow!, t, state);
+  const seen = new Set<string>();
+  const regular = inputs.collected.filter((c) => {
+    const key = `${c.index}|${c.sourcetype}`;
+    if (c.sourcetype in EXTRA_KBPS || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  // The class's own input (anything not in the os index) is the main one.
+  regular.sort((a, b) => Number(a.index === 'os') - Number(b.index === 'os'));
+  const out = regular.map((c, i) => ({
+    sourcetype: c.sourcetype,
+    index: c.index,
+    kbps: base * (regular.length === 1 ? 1 : i === 0 ? 0.7 : 0.3 / (regular.length - 1)),
+  }));
+  for (const c of inputs.collected)
+    if (c.sourcetype in EXTRA_KBPS && !out.some((o) => o.sourcetype === c.sourcetype))
+      out.push({
+        sourcetype: c.sourcetype,
+        index: c.index,
+        kbps: EXTRA_KBPS[c.sourcetype]! * (0.9 + 0.2 * unit(p.hash, Math.floor(t / 60_000), 0xdeb)),
+      });
+  return out;
 }
 
 function enterpriseMetrics(world: World, p: HostProfile, t: number, k: number, push: (l: string) => void) {
@@ -622,6 +672,31 @@ export function appLog(world: World, p: HostProfile, classId: string): LogSource
   });
 }
 
+/**
+ * /var/log/app/debug.log: verbose request dumps the app always writes. Not collected unless an
+ * input picks it up (the inputs app blacklists it). One event per 5 s here; its license volume
+ * comes from EXTRA_KBPS rather than these sample lines.
+ */
+export function debugLog(world: World, p: HostProfile): LogSource {
+  void world;
+  return source(30 * 60_000, (t0, t1) => {
+    const out: Entry[] = [];
+    periodic(t0, t1, 5_000, p.hash % 5_000, (t, k) => {
+      const n = mix32(p.hash, k, 0xdeb0);
+      const items = Array.from(
+        { length: 6 },
+        (_, i) =>
+          `"line_item_${i}":{"sku":"SKU-${(n >> i) % 99999}","qty":${1 + ((n >> (i + 3)) % 4)},"price_cents":${100 + ((n >> i) % 90000)}}`,
+      ).join(',');
+      out.push([
+        t,
+        `${isoTs(t)} DEBUG [http-nio-8080-exec-${1 + (n % 12)}] c.example.orders.OrderService - request dump orderId=${n % 900000} payload={${items}}`,
+      ]);
+    });
+    return out;
+  });
+}
+
 /** Apache/nginx access log time: 23/Oct/2026:08:00:21 +0000 */
 function accessTs(t: number): string {
   const d = new Date(t);
@@ -710,6 +785,58 @@ export function smallLog(world: World, p: HostProfile, kind: 'utility' | 'audit'
           `${splunkTs(t)} INFO  PeriodicHealthReporter - feature="TailReader-0" color=green due_to_stanza="feature:batchreader" node_type=feature node_path=splunkd.file_monitor_input.tailreader-0`,
         ]),
       );
+    return out;
+  });
+}
+
+/** scheduler.log on a search head: one line per scheduled run (at completion) or skip. */
+export function schedulerLog(world: World, p: HostProfile): LogSource {
+  return source(24 * 3_600_000, (t0, t1) =>
+    simulateScheduler(world, p, t0, t1)
+      .map((r): Entry => {
+        const s = Math.floor(r.scheduledTime / 1000);
+        const common = `savedsearch_id="${r.owner};${r.app};${r.name}", search_type="scheduled", user="${r.owner}", app="${r.app}", savedsearch_name="${r.name}", priority=default`;
+        if (r.status === 'skipped')
+          return [
+            r.logTime,
+            `${splunkTs(r.logTime)} INFO  SavedSplunker - ${common}, status=skipped, reason="${SKIP_REASON}", concurrency_category="historical_scheduled", concurrency_context="saved-search_instance-wide", concurrency_limit=${r.concurrencyLimit}, scheduled_time=${s}, window_time=0`,
+          ];
+        const sid = `scheduler__${r.owner}_c2VhcmNo__RMD5${(mix32(hashString(r.name), s) >>> 0).toString(16).padStart(8, '0')}_at_${s}_${mix32(hashString(r.name), s, 3) % 999}`;
+        return [
+          r.logTime,
+          `${splunkTs(r.logTime)} INFO  SavedSplunker - ${common}, status=success, digest_mode=1, scheduled_time=${s}, window_time=0, dispatch_time=${Math.floor(r.dispatchTime! / 1000)}, run_time=${r.runSeconds!.toFixed(3)}, result_count=${r.resultCount}, alert_actions="", sid="${sid}", suppressed=0, thread_id="AlertNotifierWorker-0", workload_pool=""`,
+        ];
+      })
+      .sort((a, b) => a[0] - b[0]),
+  );
+}
+
+/**
+ * license_usage.log on the license manager: per minute, bytes indexed per (index, sourcetype) in
+ * the previous minute (host and source squashed), and a daily RolloverSummary just after midnight.
+ */
+export function licenseUsageLog(world: World, p: HostProfile): LogSource {
+  return source(24 * 3_600_000, (t0, t1) => {
+    const out: Entry[] = [];
+    const quota = licenseQuotaBytes(world);
+    const guid = p.splunk!.guid;
+    periodic(t0, t1, 60_000, 0, (t) => {
+      const at = t + 150 + (mix32(p.hash, t / 60_000) % 700);
+      if (t % 86_400_000 === 0)
+        out.push([
+          at - 100,
+          `${splunkTs(at - 100)} INFO  LicenseUsage - type=RolloverSummary day=${(t - 86_400_000) / 1000} stack=enterprise pool=${LICENSE_POOL} b=${Math.round(bytesBetween(world, t - 86_400_000, t))} poolsz=${quota}`,
+        ]);
+      const rates = licenseRatesAt(world, t - 60_000);
+      for (const [key, bps] of [...rates.entries()].sort()) {
+        if (bps <= 0) continue;
+        const [idx, st] = key.split('|');
+        out.push([
+          at,
+          `${splunkTs(at)} INFO  LicenseUsage - type=Usage s="" st="${st}" h="" o="" idx="${idx}" i="${guid}" pool="${LICENSE_POOL}" b=${Math.round(bps * 60)} poolsz=${quota}`,
+        ]);
+      }
+    });
     return out;
   });
 }

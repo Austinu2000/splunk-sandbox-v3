@@ -1,0 +1,173 @@
+id: skipped-searches
+title: Security alerts are arriving late or not at all
+summary: >-
+  Twelve new "Security - ..." correlation searches were added to sh01, all on cron 0 * * * * over
+  -24h with no schedule_window. At the top of every hour they exceed the scheduler's concurrency limit
+  (9 on sh01: max_searches_perc = 25) and most of them, plus some existing searches, are skipped.
+topics: [search-heads, scheduler, performance]
+difficulty: hard
+trigger: { onDemand: true }
+ticket:
+  requester: Riley, Security Operations
+  persona: concerned
+  urgency: high
+  text: >-
+    We deployed our new correlation searches on sh01 yesterday, but most of them never fire, and some
+    older alerts have gone quiet too. The searches run fine when we open them by hand.
+changes:
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Brute Force Attempts'
+    set:
+      search: 'index=os sourcetype=linux_secure "Failed password" | stats count by src, user | where count > 20'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Privileged Account Changes'
+    set:
+      search: 'index=wineventlog EventCode IN (4728,4732,4756) | stats values(user) by Group_Name'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Rare Process Execution'
+    set:
+      search: 'index=os | rare limit=20 process'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Outbound Data Spike'
+    set:
+      search: 'index=network | timechart span=1h sum(bytes_out) by src'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Disabled Account Logons'
+    set:
+      search: 'index=wineventlog EventCode=4625 Sub_Status=0xC0000072 | stats count by user'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - New Admin Group Members'
+    set:
+      search: 'index=wineventlog EventCode=4728 | table _time user Group_Name'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Firewall Deny Surge'
+    set:
+      search: 'index=network action=blocked | timechart count'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Suspicious PowerShell'
+    set:
+      search: 'index=wineventlog EventCode=4104 | search ScriptBlockText="*-enc*"'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - DNS Tunneling Indicators'
+    set:
+      search: 'index=network sourcetype=syslog query_length>60 | stats count by src'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Impossible Travel'
+    set:
+      search: 'index=os sourcetype=linux_secure Accepted | iplocation src | stats dc(Country) by user'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Service Account Interactive Logon'
+    set:
+      search: 'index=wineventlog EventCode=4624 Logon_Type=2 user=svc_* | stats count by user, host'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+  - host: sh01
+    path: /opt/splunk/etc/apps/search/local/savedsearches.conf
+    stanza: 'Security - Excessive Failed VPN Logins'
+    set:
+      search: 'index=network vpn action=failure | stats count by user | where count > 10'
+      enableSched: '1'
+      cron_schedule: '0 * * * *'
+      dispatch.earliest_time: '-24h'
+      dispatch.latest_time: now
+      alert.track: '1'
+    apply: restart
+clues:
+  [
+    'index=_internal sourcetype=scheduler status=skipped | stats count by savedsearch_name, reason',
+    'Monitoring Console > Scheduler activity',
+    'sh01: splunk btool savedsearches list --debug | grep cron_schedule',
+    'sh01: splunk btool limits list scheduler --debug',
+  ]
+redHerrings:
+  - host: sh01
+    file: splunkd
+    level: WARN
+    component: DispatchManager
+    message: 'The minimum free disk space (5000MB) reached for /opt/splunk/var/run/splunk/dispatch. user=riley.'
+    everyMinutes: 13
+  - host: sh02
+    file: splunkd
+    level: ERROR
+    component: KVStorageProvider
+    message: "An error occurred during the last operation ('getServerVersion', domain: '15', code: '13053'): No suitable servers found"
+    everyMinutes: 9
+# No skipped runs over the next hour: stagger the crons, give them a schedule_window, raise the limit, or shorten them.
+fixChecks:
+  scheduler: { host: sh01, maxSkipped: 0, minutes: 60 }
+recovery: { seconds: 60 }

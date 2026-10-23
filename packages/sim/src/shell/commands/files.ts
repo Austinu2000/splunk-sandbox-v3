@@ -144,8 +144,8 @@ function messageFor(cmd: string, p: string, e: FsError): string {
   if (cmd === 'rm' && e.code === 'EISDIR') return `cannot remove '${p}': Is a directory`;
   if (cmd === 'rm') return `cannot remove '${p}': ${e.message}`;
   if (cmd === 'touch') return `cannot touch '${p}': ${e.message}`;
-  if (cmd === 'chmod' || cmd === 'chown')
-    return `changing ${cmd === 'chmod' ? 'permissions' : 'ownership'} of '${p}': ${e.message}`;
+  if (cmd === 'chmod' || cmd === 'chown' || cmd === 'chgrp')
+    return `changing ${{ chmod: 'permissions', chown: 'ownership', chgrp: 'group' }[cmd]} of '${p}': ${e.message}`;
   return `${p}: ${e.message}`;
 }
 
@@ -261,12 +261,15 @@ const chmod: CommandFn = (ctx) => {
   });
 };
 
+/** Users and groups that exist on every host (each user has a group of the same name). */
+const KNOWN_USERS = ['root', 'splunk', 'engineer', 'nobody', 'app', 'nginx', 'mysql'];
+
 const chown: CommandFn = (ctx) => {
   const o = getopt(ctx.argv.slice(1));
   const [spec, ...paths] = o.operands;
   if (!spec) return fail("chown: missing operand\nTry 'chown --help' for more information.");
   const [owner, group] = spec.split(/[:.]/);
-  const known = ['root', 'splunk', 'engineer', 'nobody'];
+  const known = KNOWN_USERS;
   if (owner && !known.includes(owner)) return fail(`chown: invalid user: '${spec}'`);
   if (group && !known.includes(group)) return fail(`chown: invalid group: '${spec}'`);
   const recursive = o.flags.has('R');
@@ -278,6 +281,23 @@ const chown: CommandFn = (ctx) => {
         { owner: owner || node.owner, group: group ?? (spec.includes(':') && owner ? owner : node.group) },
         ctx.sh.cred,
       );
+      if (recursive && node.type === 'dir')
+        for (const [name] of ctx.sh.fs.readdir(p, ctx.sh.cred)) apply(`${p}/${name}`);
+    };
+    apply(path);
+  });
+};
+
+const chgrp: CommandFn = (ctx) => {
+  const o = getopt(ctx.argv.slice(1));
+  const [group, ...paths] = o.operands;
+  if (!group) return fail("chgrp: missing operand\nTry 'chgrp --help' for more information.");
+  if (!KNOWN_USERS.includes(group)) return fail(`chgrp: invalid group: '${group}'`);
+  const recursive = o.flags.has('R');
+  return eachPath(ctx, 'chgrp', paths, (path) => {
+    const apply = (p: string) => {
+      const node = ctx.sh.fs.lookup(p, ctx.sh.cred);
+      ctx.sh.fs.setMeta(p, { group }, ctx.sh.cred);
       if (recursive && node.type === 'dir')
         for (const [name] of ctx.sh.fs.readdir(p, ctx.sh.cred)) apply(`${p}/${name}`);
     };
@@ -395,6 +415,7 @@ export const FILE_COMMANDS: Record<string, CommandFn> = {
   mv: twoPathCmd('mv'),
   chmod,
   chown,
+  chgrp,
   find,
   stat,
 };

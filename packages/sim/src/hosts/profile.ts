@@ -163,14 +163,16 @@ function buildProfile(world: World, name: string): HostProfile | null {
       site: infra.site,
       detailed: (DETAILED_HOSTS as readonly string[]).includes(infra.hostname),
       infra,
-      splunk: {
-        home: '/opt/splunk',
-        product: 'enterprise',
-        service: 'Splunkd',
-        pid: 2000 + (base.hash % 6000),
-        mgmtPort: 8089,
-        guid: guidFor(world, `instance:${infra.hostname}`),
-      },
+      splunk: infra.retired
+        ? null
+        : {
+            home: '/opt/splunk',
+            product: 'enterprise',
+            service: 'Splunkd',
+            pid: 2000 + (base.hash % 6000),
+            mgmtPort: 8089,
+            guid: guidFor(world, `instance:${infra.hostname}`),
+          },
       ...base,
       distro: RHEL9,
       cpus: big ? 32 : 8,
@@ -228,7 +230,7 @@ export function splunkVersion(world: World, p: HostProfile): string | null {
 /** Sites' indexer and heavy-forwarder addresses, used by outputs.conf and the log generators. */
 export function outputTargets(world: World, site: string, kind: 'indexers' | 'hf'): InfraNode[] {
   return world.infra.filter(
-    (n) => n.site === site && n.role === (kind === 'hf' ? 'heavy_forwarder' : 'indexer'),
+    (n) => !n.retired && n.site === site && n.role === (kind === 'hf' ? 'heavy_forwarder' : 'indexer'),
   );
 }
 

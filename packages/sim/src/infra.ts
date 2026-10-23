@@ -27,6 +27,11 @@ export function generateInfra(cfg: WorldConfig): InfraNode[] {
   add('lm01', 'license_manager', 0, 12);
   cfg.sites.forEach((_, s) => add(`hf${pad2(s + 1)}`, 'heavy_forwarder', s, 40));
 
+  // A decommissioned indexer: the machine and its DNS name still exist, but Splunk was removed.
+  // Old build images and stale outputs.conf files can still point at it.
+  add('idx07', 'indexer', 0, 27);
+  Object.assign(nodes[nodes.length - 1]!, { status: 'down', retired: true });
+
   return nodes;
 }
 

@@ -1,0 +1,91 @@
+id: timestamp-tz
+title: Application events are showing up in the future
+summary: >-
+  The cluster bundle's props for app:log gained TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N and
+  TZ = America/New_York. The format stops before the trailing Z, so the UTC timestamps are read as
+  New York local time and every app:log event is indexed four hours in the future. The change is in
+  manager-apps on cm01 and was pushed to every peer.
+topics: [parsing, timestamps, indexer-clustering]
+difficulty: hard
+trigger: { onDemand: true }
+ticket:
+  requester: Mateo, Application Support
+  persona: methodical
+  urgency: medium
+  text: >-
+    Our "last 15 minutes" app dashboards are empty, but the application is clearly logging. If I search
+    All time I can see the events, but their times are hours ahead of now. Other data looks fine.
+changes:
+  - {
+      host: cm01,
+      path: /opt/splunk/etc/manager-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: none,
+    }
+  - {
+      host: idx01,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+  - {
+      host: idx02,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+  - {
+      host: idx03,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+  - {
+      host: idx04,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+  - {
+      host: idx05,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+  - {
+      host: idx06,
+      path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf,
+      stanza: 'app:log',
+      set: { TIME_FORMAT: '%Y-%m-%dT%H:%M:%S.%3N', TZ: America/New_York },
+      apply: restart,
+    }
+clues:
+  [
+    'index=app sourcetype=app:log earliest=-1h latest=+1d | eval lag=_time-_indextime | stats avg(lag)',
+    'Compare _raw timestamps with _time',
+    'cm01: splunk btool props list app:log --debug, then splunk apply cluster-bundle',
+  ]
+redHerrings:
+  - host: idx02
+    file: messages
+    component: chronyd
+    message: Selected source 10.10.0.5 (ntp1.corp.example)
+    everyMinutes: 10
+  - host: idx04
+    file: splunkd
+    level: WARN
+    component: DateParserVerbose
+    message: >-
+      Failed to parse timestamp in first MAX_TIMESTAMP_LOOKAHEAD (128) characters of event. Defaulting to
+      timestamp of previous event (Fri Oct 23 06:41:09 2026). Context: source=/var/log/messages|host=ash-web-0117|syslog|
+    everyMinutes: 6
+# Every running peer stamps a fresh app:log event within a minute of when it was written.
+fixChecks:
+  timestamps: { host: dal-app-0001, sourcetype: 'app:log', maxSkewSeconds: 60 }
+recovery: { seconds: 30 }

@@ -1,11 +1,21 @@
-import { allDeploymentApps, CLASS_LOG_FILE, deploymentAppFiles } from '../hosts/apps';
-import { builtinApps, clusterBundle, clusterIndexes, systemDefaults, systemLocal } from '../hosts/confs';
+import { allDeploymentApps, deploymentAppFiles } from '../hosts/apps';
+import { hostDataFiles } from '../hosts/inputs';
+import {
+  builtinApps,
+  clusterBundle,
+  clusterIndexes,
+  savedSearchesConf,
+  systemDefaults,
+  systemLocal,
+} from '../hosts/confs';
+import { licenseQuotaBytes } from '../ingest/license';
 import { BASTION_USER, DOMAIN, buildFor, sshRoster, splunkVersion, type HostProfile } from '../hosts/profile';
 import {
-  appLog,
   messagesLog,
   metricsLog,
   secureLog,
+  licenseUsageLog,
+  schedulerLog,
   smallLog,
   splunkdLog,
   type LogSource,
@@ -137,9 +147,19 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries =
 
   b.file('/etc/sudoers.d/splunk', 'splunk ALL=(ALL) NOPASSWD: ALL\n', { mode: 0o440 });
   const home = '/home/splunk';
-  const sp = p.splunk!;
   const own = { owner: 'splunk', group: 'splunk' };
   b.dir(home, { ...own, mode: 0o700 });
+  if (!p.splunk) {
+    // A decommissioned Splunk host: the OS and service account remain, the installation does not.
+    b.file(`${home}/.bashrc`, '# .bashrc\n', own);
+    b.file(
+      `${home}/DECOMMISSIONED.txt`,
+      `${p.hostname} was removed from the indexer cluster on 2026-09-14 (CHG-48213).\nSplunk Enterprise was uninstalled; buckets were migrated to idx01/idx02.\nThis machine is scheduled for reimage.\n`,
+      { ...own, mtime: at(39) },
+    );
+    return b.root;
+  }
+  const sp = p.splunk;
   b.file(
     `${home}/.bashrc`,
     `# .bashrc\nif [ -f /etc/bashrc ]; then\n  . /etc/bashrc\nfi\nalias ll='ls -l --color=auto'\n`,
@@ -211,12 +231,16 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries =
   if (p.role === 'cluster_manager')
     for (const [rel, text] of Object.entries(clusterBundle()))
       b.file(`${S}/etc/manager-apps/${rel}`, text, { ...own, mtime: at(40) });
-  if (p.role === 'license_manager')
+  if (p.role === 'license_manager') {
+    const gb = licenseQuotaBytes(world) / 1024 ** 3;
     b.file(
-      `${S}/etc/licenses/enterprise/corp-enterprise-500GB.lic`,
-      '<license>\n  <signature>redacted</signature>\n  <payload><quota>536870912000</quota></payload>\n</license>\n',
+      `${S}/etc/licenses/enterprise/corp-enterprise-${gb}GB.lic`,
+      `<license>\n  <signature>redacted</signature>\n  <payload><type>enterprise</type><quota>${licenseQuotaBytes(world)}</quota></payload>\n</license>\n`,
       { ...own, mode: 0o600 },
     );
+  }
+  if (p.hostname === 'sh01')
+    b.file(`${S}/etc/apps/search/local/savedsearches.conf`, savedSearchesConf(), { ...own, mtime: at(18) });
 
   // Logs and runtime state
   const logs: [string, LogSource][] = [
@@ -225,6 +249,12 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries =
     ['splunkd-utility.log', smallLog(world, p, 'utility')],
     ['audit.log', smallLog(world, p, 'audit')],
     ['health.log', smallLog(world, p, 'health')],
+    ...(p.role === 'search_head'
+      ? ([['scheduler.log', schedulerLog(world, p)]] as [string, LogSource][])
+      : []),
+    ...(p.role === 'license_manager'
+      ? ([['license_usage.log', licenseUsageLog(world, p)]] as [string, LogSource][])
+      : []),
   ];
   for (const [name, source] of logs)
     b.file(`${S}/var/log/splunk/${name}`, { source }, { ...own, mode: 0o600 });
@@ -247,11 +277,18 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries =
 
   // Business data on forwarders
   if (p.fleetRow !== undefined) {
-    const cls = world.config.serverClasses[world.fleet.serverClass[p.fleetRow]!]!.id;
-    const file = CLASS_LOG_FILE[cls];
-    if (file) b.file(file, { source: appLog(world, p, cls) }, { mode: 0o644 });
+    for (const f of hostDataFiles(world, p))
+      if (f.path !== '/var/log/messages' && f.path !== '/var/log/secure')
+        b.file(f.path, { source: f.log }, { owner: f.owner, group: f.group, mode: f.mode });
   }
+  // The installer runs as splunk: every directory under $SPLUNK_HOME is the service account's.
+  ownDirs(b.dir(S), own);
   return b.root;
+}
+
+function ownDirs(dir: FsDir, own: { owner: string; group: string }): void {
+  Object.assign(dir, own);
+  for (const child of dir.children.values()) if (child.type === 'dir') ownDirs(child, own);
 }
 
 function addApp(world: World, b: TreeBuilder, dir: string, app: string, meta: Partial<NodeMeta>): void {

@@ -1,6 +1,6 @@
 # Splunk Engineer Sandbox — Plan
 
-Status: **milestone 5 implemented** (2026-10-23). Milestones 1–5 are implemented; the architecture below records the original design. See README.md for current behavior and simulation limits. The spec is in `SPEC.md`; project rules are in `CLAUDE.md`.
+Status: **milestone 6 implemented** (2026-10-23). Milestones 1–6 are implemented; the architecture below records the original design. See README.md for current behavior and simulation limits. The spec is in `SPEC.md`; project rules are in `CLAUDE.md`.
 
 Decisions already made: localhost only, single user, no auth. Claude API grading is optional and off by default.
 

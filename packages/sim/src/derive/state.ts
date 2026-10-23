@@ -36,6 +36,8 @@ export interface ServerclassRule {
   name: string;
   whitelist: RegExp[];
   blacklist: RegExp[];
+  /** The patterns as written in serverclass.conf. */
+  specs: { whitelist: string[]; blacklist: string[] };
   apps: string[];
 }
 
@@ -75,11 +77,11 @@ export function serverclassPattern(p: string): RegExp {
   }
 }
 
-function numbered(st: Map<string, { value: string }>, prefix: string): RegExp[] {
+function numbered(st: Map<string, { value: string }>, prefix: string): string[] {
   return [...st.entries()]
     .filter(([k]) => new RegExp(`^${prefix}\\.\\d+$`).test(k))
     .sort((a, b) => Number(a[0].split('.')[1]) - Number(b[0].split('.')[1]))
-    .map(([, v]) => serverclassPattern(v.value));
+    .map(([, v]) => v.value);
 }
 
 export function parseServerclass(m: MergedConf, availableApps: Set<string>): ServerclassRule[] {
@@ -88,9 +90,19 @@ export function parseServerclass(m: MergedConf, availableApps: Set<string>): Ser
     const cls = /^serverClass:([^:]+)$/.exec(name);
     if (cls) {
       if (confBool(st.settings.get('disabled')?.value)) continue;
-      const r = rules.get(cls[1]!) ?? { name: cls[1]!, whitelist: [], blacklist: [], apps: [] };
-      r.whitelist = numbered(st.settings, 'whitelist');
-      r.blacklist = numbered(st.settings, 'blacklist');
+      const r = rules.get(cls[1]!) ?? {
+        name: cls[1]!,
+        whitelist: [],
+        blacklist: [],
+        specs: { whitelist: [], blacklist: [] },
+        apps: [],
+      };
+      r.specs = {
+        whitelist: numbered(st.settings, 'whitelist'),
+        blacklist: numbered(st.settings, 'blacklist'),
+      };
+      r.whitelist = r.specs.whitelist.map(serverclassPattern);
+      r.blacklist = r.specs.blacklist.map(serverclassPattern);
       rules.set(cls[1]!, r);
     }
   }
@@ -214,8 +226,10 @@ export function initDerived(world: World): DerivedState {
     classCounts: {},
   };
   world.derived = d;
-  for (const node of world.infra)
-    d.listening.set(node.hostname, receivingPorts(world, resolveHost(world, node.hostname)!));
+  for (const node of world.infra) {
+    const p = resolveHost(world, node.hostname)!;
+    d.listening.set(node.hostname, p.splunk ? receivingPorts(world, p) : []);
+  }
   recomputeDeployment(world);
   return d;
 }
@@ -345,7 +359,7 @@ runtimeHooks.changed.push((world, p) => {
   if (!world.derived) return;
   const d = world.derived;
   if (p.role === 'deployment_server') recomputeDeployment(world);
-  if (p.infra) d.listening.set(p.hostname, receivingPorts(world, p));
+  if (p.infra && p.splunk) d.listening.set(p.hostname, receivingPorts(world, p));
   if (p.fleetRow !== undefined) {
     const s = serviceState(world, p.hostname);
     if (s && !s.running) d.stopped.add(p.fleetRow);

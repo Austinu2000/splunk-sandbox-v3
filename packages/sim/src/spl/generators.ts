@@ -1,5 +1,5 @@
-import { appsFor, matchRules } from '../derive/state';
-import { forwarderRecord, hostname as fleetHostname, ipAddress } from '../fleet/query';
+import { dsClient } from '../ds/manage';
+import { forwarderRecord } from '../fleet/query';
 import { DOMAIN, ENTERPRISE_VERSION, resolveHost, splunkdRunning, type HostProfile } from '../hosts/profile';
 import { hostTimeline, type Timeline } from '../logs/sources';
 import { clusterIndexes } from '../hosts/confs';
@@ -64,7 +64,13 @@ export function lookupTable(ctx: RunContext, rawName: string): LookupTable {
     return {
       columns: ['host', 'role', 'site', 'ip', 'status'],
       rows: world.infra.map((n) =>
-        Row.of({ host: n.hostname, role: n.role, site: n.site, ip: n.ip, status: n.status }),
+        Row.of({
+          host: n.hostname,
+          role: n.role,
+          site: n.site,
+          ip: n.ip,
+          status: n.retired ? 'retired' : n.status,
+        }),
       ),
     };
   }
@@ -114,7 +120,7 @@ export function rest(ctx: RunContext, endpoint: string, opts: Map<string, string
   const server = opts.get('splunk_server');
   const sh = resolveHost(world, 'sh01')!;
   const indexers = world.infra
-    .filter((n) => n.role === 'indexer')
+    .filter((n) => n.role === 'indexer' && !n.retired)
     .map((n) => resolveHost(world, n.hostname)!);
   const peers = [sh, ...indexers.filter((p) => splunkdRunning(world, p))];
   const scope = (rows: Row[]) =>
@@ -175,21 +181,19 @@ export function rest(ctx: RunContext, endpoint: string, opts: Map<string, string
       const rows: Row[] = [];
       const rules = world.derived.rules;
       for (let r = 0; r < world.fleet.size; r++) {
-        const h = fleetHostname(world, r);
-        const names = [h, `${h}.${DOMAIN}`, ipAddress(world, r)];
-        const rec = forwarderRecord(world, r);
+        const c = dsClient(world, r, rules);
         rows.push(
           Row.of({
             splunk_server: 'ds01',
-            hostname: h,
-            clientName: h,
-            dns: `${h}.${DOMAIN}`,
-            ip: rec.ip,
-            utsname: rec.os === 'windows' ? 'windows-x64' : 'linux-x86_64',
-            build: rec.version,
-            lastPhoneHomeTime: Math.floor(rec.lastPhoneHome / 1000),
-            serverClasses: matchRules(rules, names).map((x) => x.name),
-            applications: appsFor(rules, names),
+            hostname: c.hostname,
+            clientName: c.hostname,
+            dns: `${c.hostname}.${DOMAIN}`,
+            ip: c.ip,
+            utsname: c.os === 'windows' ? 'windows-x64' : 'linux-x86_64',
+            build: c.build,
+            lastPhoneHomeTime: Math.floor(c.lastPhoneHome / 1000),
+            serverClasses: c.serverClasses,
+            applications: c.apps,
           }),
         );
       }
@@ -237,7 +241,8 @@ export function metadata(ctx: RunContext, type: string, index: string | undefine
   if (!['hosts', 'sources', 'sourcetypes'].includes(type))
     throw new SplError('Invalid type. Use type=hosts, type=sources or type=sourcetypes.', command);
   const pd = pushdown(parseSearch(index ? `index=${index}` : ''));
-  const { world, earliest, latest } = ctx;
+  const { world, earliest } = ctx;
+  const latest = Math.min(ctx.latest, world.clock.now);
   const wantData = INDEXES.some((i) => !i.startsWith('_') && indexAllowed(pd, i));
   const groups = new Map<string, { first: number; last: number; count: number }>();
   const add = (key: string, last: number, count: number) => {

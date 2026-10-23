@@ -92,7 +92,8 @@ describe('fleet generation', () => {
 
   it('places infrastructure nodes outside the forwarder fleet', () => {
     const roles = big.infra.map((n) => n.role);
-    expect(roles.filter((r) => r === 'indexer')).toHaveLength(6);
+    expect(big.infra.filter((n) => n.role === 'indexer' && !n.retired)).toHaveLength(6);
+    expect(big.infra.find((n) => n.hostname === 'idx07')).toMatchObject({ retired: true, status: 'down' });
     for (const r of [
       'search_head',
       'deployment_server',

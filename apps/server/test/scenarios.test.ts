@@ -5,7 +5,7 @@ const { app } = buildApp(createWorld({ fleetSize: 1000 }));
 afterAll(() => app.close());
 describe('incident API', () => {
   it('lists the catalog, starts tickets, rejects unknown/duplicate starts and premature closure', async () => {
-    expect((await app.inject('/api/scenarios')).json()).toHaveLength(3);
+    expect((await app.inject('/api/scenarios')).json()).toHaveLength(8);
     expect((await app.inject('/api/tickets')).json()).toEqual([]);
     const start = await app.inject({ method: 'POST', url: '/api/scenarios/ds-serverclass-typo/start' });
     expect(start.statusCode).toBe(200);

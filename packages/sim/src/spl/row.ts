@@ -3,8 +3,10 @@ import type { Value } from './values';
 
 /** An indexed event, before search-time field extraction. */
 export interface SplEvent {
-  /** Epoch ms. */
+  /** Epoch ms: the extracted timestamp. */
   time: number;
+  /** Epoch ms the event was indexed (defaults to time). */
+  indexTime?: number;
   raw: string;
   host: string;
   source: string;
@@ -48,6 +50,8 @@ export class Row {
         return e.time / 1000;
       case '_raw':
         return e.raw;
+      case '_indextime':
+        return Math.floor((e.indexTime ?? e.time) / 1000);
       case 'host':
         return e.host;
       case 'source':

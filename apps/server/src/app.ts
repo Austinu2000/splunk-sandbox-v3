@@ -11,6 +11,7 @@ import {
   worldInfo,
   type World,
 } from '@sandbox/sim';
+import { registerConsoles } from './consoles';
 import { registerSearch } from './search';
 import { registerTerminal } from './terminal';
 
@@ -41,6 +42,7 @@ export function buildApp(world: World, opts: { logger?: boolean } = {}): Sandbox
   const terminals = registerTerminal(app, world);
   registerSearch(app, world);
   registerScenarios(app, world);
+  registerConsoles(app, world);
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
     if (err instanceof ScenarioError || err instanceof FilterError || err.validation)

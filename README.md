@@ -6,7 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 
-**Status:** milestone 5 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, and a data-driven incident engine with tickets and three solution-tested incidents.
+**Status:** milestone 6 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, an incident engine with eight solution-tested incidents, the Monitoring Console and Forwarder Management.
 
 ## Requirements
 
@@ -142,7 +142,7 @@ What gets indexed follows the world:
 - Removing an inputs app on the deployment server stops that data, while `_internal` carries on.
 - `splunk_server` is the indexer the forwarder was connected to at the time.
 
-**SPL subset.** The base search supports terms, `"phrases"`, `field=value` with wildcards, `!= < <= > >=`, `AND`/`OR`/`NOT` (OR binds tighter than AND, as in Splunk), and `earliest=`/`latest=` (relative, snapped, epoch or absolute). Commands:
+**SPL subset.** The base search supports terms, `"phrases"`, `field=value` with wildcards, `!= < <= > >=`, `AND`/`OR`/`NOT` (OR binds tighter than AND, as in Splunk), and `earliest=`/`latest=` (relative, snapped, epoch or absolute). `latest` may be up to two days ahead (`latest=+1d`), so events with wrongly extracted future timestamps can be found; `_indextime` holds when each event arrived. Commands:
 
 | Kind | Commands |
 |---|---|
@@ -187,7 +187,7 @@ Open **Incidents & Tickets** and start an incident. Investigate with the fleet, 
 |---|---|
 | `title`, `ticket` | The symptom: what the requester reports |
 | `summary` | The root cause (hidden from the UI) |
-| `changes` | Stanza edits through the virtual filesystem, applied with `restart` or `deploy-server` (reload) |
+| `changes` | Stanza edits (`set`, `unset`) through the virtual filesystem, applied with `restart`, `deploy-server` (reload) or `none` (disk only, such as the manager's copy of the cluster bundle). Several changes may edit one file; each host restarts or reloads once. A `file` change sets the mode and owner of an existing file instead. |
 | `redHerrings` | Real log lines written to a host's `splunkd.log` or `/var/log/messages` every N minutes until the ticket closes. They are greppable and searchable like any other line. A forwarder with injected lines skips search gating, so search results stay exact. |
 | `fixChecks` | Outcomes, combinable with `all` / `any` |
 | `clues` | Notes for authors and hints |
@@ -197,26 +197,62 @@ Open **Incidents & Tickets** and start an incident. Investigate with the fleet, 
 - `fleet`: at most N% of a site or server class is in a given health state.
 - `parsingQueue`: whether an indexer's parsing queue is blocked.
 - `eventBreaking`: whether an indexer's running props keep consecutive events of a sourcetype separate.
+- `license`: projected daily license usage at most N% of the quota.
+- `timestamps`: every running indexer stamps a fresh event of a sourcetype within N seconds of when it was written.
+- `forwarderDelivering`: a forwarder is neither blocked nor offline.
+- `collecting`: a forwarder is reading a given file.
+- `scheduler`: at most N skipped runs on a search head over the next M minutes, under its running config.
 - `effectiveConf`: one exact running setting, for incidents where that really is the point.
 
 All checks read running state, so saving a file alone never resolves a ticket.
 
 **Ticket states:** open → recovering → resolved → closed. If the problem comes back before the ticket is closed, it reopens and the recovery timer resets.
 
-### The three incidents (spoilers)
+### The incidents (spoilers)
 
 | Ticket | Cause | One correct fix |
 |---|---|---|
 | Dallas web access logs went quiet | `serverClass:linux_web` whitelist typo `dal-wbe-*` on ds01 | Fix the whitelist (`dal-web-*` or any pattern matching the Dallas web servers), then `splunk reload deploy-server` |
 | Dallas forwarders are backing up | idx01 `[queue=parsingQueue] maxSize = 1KB` in system/local/server.conf | Give the queue an adequate size (for example the 6MB default or more), then restart idx01 |
 | Application search results look jumbled | idx01 cluster props for `app:log` set to `SHOULD_LINEMERGE = true` with a `LINE_BREAKER` that never matches | Turn line merging off or restore a working `LINE_BREAKER`, then restart idx01 |
+| License usage is heading for a violation | A `[monitor:///var/log/app/debug.log]` stanza added to `org_linux_app_inputs/local` on ds01; every linux_app forwarder ships DEBUG dumps | Disable or remove the stanza and `splunk reload deploy-server`, or send `app:debug` to `nullQueue` in the cluster bundle |
+| Application events are showing up in the future | Cluster bundle props for `app:log`: `TIME_FORMAT` stops before the trailing `Z` and `TZ = America/New_York`, so events land four hours ahead | On cm01, remove `TZ` or add `%z` to the format in manager-apps, then `splunk apply cluster-bundle` |
+| An Ashburn app server stopped sending data | ash-app-0001 has a local `outputs.conf` pointing `ash_indexers` at retired idx07 | Remove the override (or point it at live indexers), then restart the forwarder |
+| MySQL logs from a Dallas database server are missing | `/var/log/mysql/mysqld.log` on dal-db-0001 is `mysql:mysql 0600`; the splunk user can't read it | `chmod 644`, or `chgrp splunk` plus `chmod 640` (no restart needed) |
+| Security alerts are arriving late or not at all | Twelve new hourly `-24h` searches on sh01 share `cron_schedule = 0 * * * *` and exceed the scheduler limit (9) | Stagger the crons, add `schedule_window`, shorten the ranges or raise the limit, then restart sh01 |
 
-Each has a solution-run test in `packages/sim/test/scenario.test.ts`, including alternative fixes. At 30×, recovery takes a few wall-clock seconds. Events indexed before a parsing fix stay merged, so check new data. The original application files always keep their individual lines.
+Each has a solution-run test, including alternative fixes: the first three in `packages/sim/test/scenario.test.ts`, the rest in `packages/sim/test/incidents.test.ts`. At 30×, recovery takes a few wall-clock seconds. Events indexed before a parsing fix stay merged, so check new data. The original application files always keep their individual lines.
 
 **Simulation limits:**
 - Line merging models an unmatched breaker in fixed two-minute windows on the receiving indexer. It isn't a full implementation of Splunk parsing.
 - Queues below 512KB saturate under the simulated steady load. Backpressure blocks the whole upstream output group, even when another receiver is reachable.
-- Monitoring Console alerts and cluster-bundle commands come in later milestones.
+- Timestamp extraction supports common `strptime` codes (`%Y %m %d %H %M %S %3N %z %Z %b %p %s` and more) and a fixed table of time zones with their late-October 2026 offsets. When the format doesn't match, the event keeps its write time; Splunk would guess from nearby events.
+- License usage uses each server class's mean throughput, not a sum over individual events.
+- The scheduler runs each search for a fixed time based on its range. Only the instance-wide concurrency limit can cause a skip.
+- File permissions are checked against the splunk user and group only. ACLs and supplementary groups are not modelled.
+- Monitoring Console alerting (email or webhook actions) isn't simulated.
+
+## Monitoring Console and Forwarder Management (milestone 6)
+
+**Monitoring Console** has four views:
+- **Indexing performance:** parsing queue fill and indexing rate per indexer.
+- **Forwarders:** which forwarders are sending, blocked or missing, by site.
+- **License usage:** usage today, projected daily total and volume by sourcetype.
+- **Scheduler activity:** runs and skips per search head, with reasons.
+
+Each panel runs an SPL search on the server over the same data as Search & Reporting, and **Open in Search** opens that search. Two kinds of panel read world state directly, as Splunk's own console reads REST:
+- the forwarder tables, because a fleet-wide `| metadata` search takes several seconds at 35,000 hosts;
+- the projected license table.
+
+**Forwarder Management** is read-only. It shows ds01's clients, server classes and deployment apps as the deployment server is running them:
+- An edit to `serverclass.conf` appears only after `splunk reload deploy-server`.
+- An app whose files changed on disk shows **reload pending**.
+- Client records also back `| rest /services/deployment/server/clients`.
+
+**Indexer cluster bundle.** On cm01:
+- `splunk apply cluster-bundle` (confirm `y`, or pass `--answer-yes`) copies `etc/manager-apps` to every live peer's `etc/peer-apps` and restarts those peers.
+- `splunk show cluster-bundle-status` compares each peer's active bundle checksum with the manager's.
+- idx07 is a decommissioned indexer. Its OS and service account remain, but Splunk is uninstalled.
 
 ## API
 
@@ -252,3 +288,11 @@ Each has a solution-run test in `packages/sim/test/scenario.test.ts`, including 
 | POST | `/api/scenarios/:id/start` | Apply an incident and open a ticket |
 | GET | `/api/tickets` | Tickets and current recovery status |
 | POST | `/api/tickets/:id/close` | `{ "note": "Root cause, fix, verification" }`; requires resolved state |
+
+### Monitoring Console and Forwarder Management (milestone 6)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/mc/:view` | `indexing`, `forwarders`, `license` or `scheduler`: stats plus panels (SPL, columns, rows); cached per tick |
+| GET | `/api/ds/overview` | Server classes (patterns, apps, client counts), deployment apps, unmatched clients |
+| GET | `/api/ds/clients` | `offset`, `limit` (≤500), `q`, `serverClass`, `unmatched` |

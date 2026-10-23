@@ -42,7 +42,15 @@ export const CLASS_INPUTS: Record<string, ClassInputs> = {
   },
   linux_app: {
     app: 'org_linux_app_inputs',
-    inputs: [{ stanza: 'monitor:///var/log/app/*.log', sourcetype: 'app:log', index: 'app' }],
+    inputs: [
+      {
+        stanza: 'monitor:///var/log/app/*.log',
+        sourcetype: 'app:log',
+        index: 'app',
+        // The app's debug log is far too verbose to collect.
+        extra: { blacklist: 'debug\\.log$' },
+      },
+    ],
   },
   linux_web: {
     app: 'org_linux_web_inputs',

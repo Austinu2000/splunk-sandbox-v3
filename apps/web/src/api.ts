@@ -1,5 +1,9 @@
 import type {
   ClockSpeed,
+  DsClientDto,
+  DsOverviewDto,
+  McView,
+  McViewDto,
   ScenarioDto,
   TicketDto,
   FleetFilter,
@@ -47,6 +51,12 @@ export const api = {
       body: JSON.stringify({ note }),
     }),
   world: () => request<WorldInfo>('/api/world'),
+  monitoring: (view: McView) => request<McViewDto>(`/api/mc/${view}`),
+  dsOverview: () => request<DsOverviewDto>('/api/ds/overview'),
+  dsClients: (q: { offset: number; limit: number; q?: string; serverClass?: string; unmatched?: boolean }) =>
+    request<PageDto<DsClientDto>>(
+      `/api/ds/clients${query({ ...q, unmatched: q.unmatched ? 'true' : undefined })}`,
+    ),
   search: (req: SearchRequestDto) =>
     request<{
       job: SearchJobDto;

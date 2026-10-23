@@ -99,10 +99,15 @@ function snapshotOverlay(world: World, host: string, filter?: (path: string) => 
 }
 
 /** Hooks run after a host's running state changes (the derivation layer registers here). */
-export const runtimeHooks: { changed: ((world: World, p: HostProfile) => void)[] } = { changed: [] };
+export const runtimeHooks: {
+  changed: ((world: World, p: HostProfile) => void)[];
+  beforeChange: ((world: World, p: HostProfile) => void)[];
+} = { changed: [], beforeChange: [] };
 const notify = (world: World, p: HostProfile) => runtimeHooks.changed.forEach((h) => h(world, p));
+const announce = (world: World, p: HostProfile) => runtimeHooks.beforeChange.forEach((h) => h(world, p));
 
 export function stopSplunk(world: World, p: HostProfile): void {
+  announce(world, p);
   const s = state(world, p.hostname);
   if (!s.running) return;
   s.running = false;
@@ -112,6 +117,7 @@ export function stopSplunk(world: World, p: HostProfile): void {
 }
 
 export function startSplunk(world: World, p: HostProfile): void {
+  announce(world, p);
   const s = state(world, p.hostname);
   if (s.running) return;
   // Every start re-reads all config from disk.
@@ -135,6 +141,7 @@ export function isDeploymentPath(p: HostProfile, path: string): boolean {
 }
 
 export function reloadDeployServer(world: World, p: HostProfile, cls?: string): void {
+  announce(world, p);
   ensureFs(world, p);
   snapshotOverlay(world, p.hostname, (path) => isDeploymentPath(p, path));
   const event: ServiceEvent = { time: world.clock.now, kind: 'reload', detail: cls };

@@ -70,7 +70,8 @@ export function systemDefaults(p: HostProfile, version: string): Record<string, 
     'limits.conf':
       header(version, 'limits.conf') +
       `[thruput]\nmaxKBps = ${enterprise ? 0 : 256}\n\n[search]\nmax_searches_per_cpu = 1\nbase_max_searches = 6\nmax_rt_search_multiplier = 1\n\n` +
-      `[inputproc]\nmax_fd = 100\ntime_before_close = 3\nfile_tracking_db_threshold_mb = 500\n`,
+      `[inputproc]\nmax_fd = 100\ntime_before_close = 3\nfile_tracking_db_threshold_mb = 500\n\n` +
+      `[scheduler]\nmax_searches_perc = 50\nauto_summary_perc = 50\n`,
   };
   if (enterprise) {
     files['indexes.conf'] =
@@ -180,6 +181,8 @@ export function systemLocal(world: World, p: HostProfile): Record<string, string
       '',
     );
   } else if (role === 'search_head') {
+    // Keep most search capacity for people: the scheduler gets a quarter of it.
+    files['limits.conf'] = `[scheduler]\nmax_searches_perc = 25\n`;
     server.push(
       '[clustering]',
       'mode = searchhead',
@@ -233,4 +236,121 @@ export function builtinApps(p: HostProfile): string[] {
   if (p.role === 'search_head' || p.role === 'cluster_manager')
     apps.push('splunk_monitoring_console', 'splunk_secure_gateway');
   return apps.sort();
+}
+
+/** Scheduled searches on sh01: staggered so the scheduler never runs out of slots. */
+const SCHEDULED: [name: string, cron: string, earliest: string, search: string][] = [
+  ['Errors by host', '2-59/15 * * * *', '-15m', 'index=_internal log_level=ERROR | stats count by host'],
+  [
+    'Blocked forwarder queues',
+    '4-59/15 * * * *',
+    '-15m',
+    'index=_internal source=*metrics.log group=queue blocked=true | stats dc(host)',
+  ],
+  [
+    'Web 5xx rate',
+    '7-59/15 * * * *',
+    '-15m',
+    'index=app sourcetype=access_combined status>=500 | stats count by host',
+  ],
+  [
+    'Payment gateway timeouts',
+    '9-59/15 * * * *',
+    '-15m',
+    'index=app sourcetype=app:log "Payment gateway timeout" | stats count',
+  ],
+  [
+    'Failed SSH logins',
+    '11-59/15 * * * *',
+    '-15m',
+    'index=os sourcetype=linux_secure "Connection closed by authenticating user" | stats count by host',
+  ],
+  [
+    'Firewall connection rate',
+    '13-59/15 * * * *',
+    '-15m',
+    'index=network sourcetype=syslog | stats count by message_id',
+  ],
+  [
+    'Hourly app error summary',
+    '5 * * * *',
+    '-60m',
+    'index=app sourcetype=app:log log_level=ERROR | stats count by host',
+  ],
+  [
+    'Hourly web traffic',
+    '10 * * * *',
+    '-60m',
+    'index=app sourcetype=access_combined | timechart span=5m count by status',
+  ],
+  [
+    'Hourly DB connection aborts',
+    '16 * * * *',
+    '-60m',
+    'index=app sourcetype=mysqld Aborted | stats count by host',
+  ],
+  [
+    'Forwarder phone-home report',
+    '20 * * * *',
+    '-4h',
+    '| metadata type=hosts index=_internal | eval age=now()-lastTime | where age>900',
+  ],
+  [
+    'License usage by sourcetype',
+    '25 * * * *',
+    '-24h',
+    'index=_internal source=*license_usage.log type=Usage | stats sum(b) by st',
+  ],
+  [
+    'Deployment client changes',
+    '31 * * * *',
+    '-4h',
+    'index=_internal sourcetype=splunkd component=DeployedApplication | stats count by host',
+  ],
+  [
+    'Windows logon failures',
+    '35 * * * *',
+    '-60m',
+    'index=os sourcetype=WinEventLog:Security EventCode=4625 | stats count by host',
+  ],
+  [
+    'Indexer queue health',
+    '41 * * * *',
+    '-60m',
+    'index=_internal source=*metrics.log group=queue host=idx* | stats max(current_size_kb) by host name',
+  ],
+  ['Top firewall talkers', '46 * * * *', '-4h', 'index=network | top limit=20 message_id'],
+  [
+    'Daily capacity rollup',
+    '50 * * * *',
+    '-24h',
+    'index=_internal source=*metrics.log group=per_sourcetype_thruput | stats sum(kb) by series',
+  ],
+  [
+    'Scheduler skip report',
+    '55 * * * *',
+    '-60m',
+    'index=_internal sourcetype=scheduler status=skipped | stats count by savedsearch_name',
+  ],
+  [
+    'Asset inventory refresh',
+    '58 * * * *',
+    '-24h',
+    '| inputlookup forwarder_inventory | stats count by site, os',
+  ],
+];
+
+export function savedSearchesConf(): string {
+  return (
+    SCHEDULED.map(([name, cron, earliest, search]) =>
+      [
+        `[${name}]`,
+        'enableSched = 1',
+        `cron_schedule = ${cron}`,
+        `dispatch.earliest_time = ${earliest}`,
+        'dispatch.latest_time = now',
+        `search = ${search}`,
+      ].join('\n'),
+    ).join('\n\n') + '\n'
+  );
 }

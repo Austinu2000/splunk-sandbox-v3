@@ -15,7 +15,16 @@ import {
 import { globToRegExp } from '../../vfs/path';
 import { ROOT } from '../../vfs/vfs';
 import type { Shell } from '../shell';
-import { fail, ok, type CmdResult, type CommandFn } from '../types';
+import {
+  fail,
+  ok,
+  type CmdResult,
+  type CmdReturn,
+  type CommandFn,
+  type Program,
+  type ProgramHost,
+} from '../types';
+import { applyClusterBundle, checksum, clusterPeers, managerBundle, peerBundle } from '../../hosts/cluster';
 
 /**
  * The splunk CLI. btool reads config files on disk (like the real one); list/show commands report
@@ -192,6 +201,79 @@ function reloadDeploy(sh: Shell, args: string[]): CmdResult {
   return ok('Reloading serverclass(es).\n\n');
 }
 
+// ---------------------------------------------------------------- cluster bundle
+
+function notManager(): CmdResult {
+  return fail("In handler 'clustermastercontrol': This node is not the cluster manager.");
+}
+
+function doApply(sh: Shell): string {
+  const { checksum: sum, restarted } = applyClusterBundle(sh.world, sh.host);
+  return (
+    `Created new bundle with checksum=${sum}\n` +
+    'Applying new bundle. The peers may restart depending on the configurations in applied bundle.\n' +
+    "Use 'splunk show cluster-bundle-status' for checking the status of the applied bundle.\n" +
+    (restarted.length ? `Rolling restart of peers: ${restarted.join(', ')}\n` : '') +
+    'OK\n'
+  );
+}
+
+const BUNDLE_WARNING =
+  'Warning: Under some circumstances, this command will initiate a rolling restart\n' +
+  'of all peers. This depends on the contents of the configuration bundle. For\n' +
+  'details, refer to the documentation.\n';
+
+function applyBundle(sh: Shell, args: string[]): CmdReturn {
+  if (sh.host.role !== 'cluster_manager') return notManager();
+  if (!splunkdRunning(sh.world, sh.host)) return notRunning();
+  if (args.includes('--answer-yes')) return ok(BUNDLE_WARNING + doApply(sh));
+  // Interactive confirmation, like the real CLI.
+  let host: ProgramHost;
+  let answer = '';
+  const program: Program = {
+    start(h) {
+      host = h;
+      host.write(BUNDLE_WARNING + 'Do you want to continue? [y/n]: ');
+    },
+    key(k) {
+      if (k.name === 'ctrl' && k.ch === 'c') {
+        host.write('^C\n');
+        return host.exit(130);
+      }
+      if (k.name === 'backspace' && answer) {
+        answer = answer.slice(0, -1);
+        return host.write('\b \b');
+      }
+      if (k.name === 'char') {
+        answer += k.ch;
+        return host.write(k.ch!);
+      }
+      if (k.name !== 'enter') return;
+      host.write('\n');
+      if (/^y(es)?$/i.test(answer.trim())) {
+        host.write(doApply(sh));
+        host.exit(0);
+      } else {
+        host.write('Operation aborted.\n');
+        host.exit(1);
+      }
+    },
+  };
+  return { program };
+}
+
+function bundleStatus(sh: Shell): CmdResult {
+  if (sh.host.role !== 'cluster_manager') return notManager();
+  if (!splunkdRunning(sh.world, sh.host)) return notRunning();
+  const latest = checksum(managerBundle(sh.world, sh.host));
+  const peers = clusterPeers(sh.world).map((p) => {
+    const running = splunkdRunning(sh.world, p);
+    const active = running ? checksum(peerBundle(sh.world, p)) : '';
+    return `\t${p.hostname}\t${p.site}\t${running ? 'Up' : 'Down'}\tactive_bundle=${active || 'n/a'}\t${active === latest ? 'in sync' : 'out of date'}`;
+  });
+  return ok(`manager\n\tlatest_bundle (on disk)\n\t\tchecksum=${latest}\n\npeers\n${peers.join('\n')}\n`);
+}
+
 // ---------------------------------------------------------------- entry point
 
 export const splunk: CommandFn = ({ sh, argv }) => {
@@ -213,7 +295,9 @@ export const splunk: CommandFn = ({ sh, argv }) => {
           `    btool check\n` +
           `    list forward-server | list monitor\n` +
           `    show deploy-poll\n` +
-          `    reload deploy-server [-class NAME]      (deployment server)\n\n`,
+          `    reload deploy-server [-class NAME]      (deployment server)\n` +
+          `    apply cluster-bundle [--answer-yes]     (cluster manager)\n` +
+          `    show cluster-bundle-status              (cluster manager)\n\n`,
       );
     case 'version':
       return ok(`${productName(p)} ${version} (build ${buildFor(version)})\n`);
@@ -237,9 +321,13 @@ export const splunk: CommandFn = ({ sh, argv }) => {
       break;
     case 'show':
       if (rest[0] === 'deploy-poll') return showDeployPoll(sh);
+      if (rest[0] === 'cluster-bundle-status') return bundleStatus(sh);
       break;
     case 'reload':
       return reloadDeploy(sh, rest);
+    case 'apply':
+      if (rest[0] === 'cluster-bundle') return applyBundle(sh, rest.slice(1));
+      break;
     default:
       break;
   }

@@ -188,3 +188,78 @@ export interface TicketDto {
   /** The incident's fix checks have failed at least once (the symptom really appeared). */
   symptomSeen?: boolean;
 }
+
+// ---------------------------------------------------------------- Monitoring Console
+
+export const MC_VIEWS = ['indexing', 'forwarders', 'license', 'scheduler'] as const;
+export type McView = (typeof MC_VIEWS)[number];
+
+export interface McStatDto {
+  label: string;
+  value: string;
+  tone?: 'ok' | 'warn' | 'bad';
+  hint?: string;
+}
+
+/** One dashboard panel: an SPL search run on the server (or a fleet query), with the SPL to open it in Search. */
+export interface McPanelDto {
+  id: string;
+  title: string;
+  /** line/area: a timechart (first column _time); table: rows as-is. */
+  chart: 'line' | 'area' | 'table';
+  unit?: string;
+  search: string;
+  earliest: string;
+  latest: string;
+  columns: string[];
+  rows: Record<string, ResultValue>[];
+  messages: SearchMessageDto[];
+  /** Shown when there are no rows. */
+  empty?: string;
+}
+
+export interface McViewDto {
+  view: McView;
+  generatedAt: number;
+  stats: McStatDto[];
+  panels: McPanelDto[];
+}
+
+// ---------------------------------------------------------------- Forwarder Management
+
+export interface DsClientDto {
+  hostname: string;
+  ip: string;
+  os: OsFamily;
+  build: string;
+  lastPhoneHome: number;
+  health: HealthState;
+  serverClasses: string[];
+  apps: string[];
+}
+
+export interface DsServerClassDto {
+  name: string;
+  whitelist: string[];
+  blacklist: string[];
+  apps: string[];
+  clients: number;
+}
+
+export interface DsAppDto {
+  name: string;
+  serverClasses: string[];
+  clients: number;
+  /** Whether a change saved on disk is waiting for `splunk reload deploy-server`. */
+  pendingReload: boolean;
+}
+
+export interface DsOverviewDto {
+  server: string;
+  phoneHomeIntervalSeconds: number;
+  totalClients: number;
+  /** Clients that match no server class (so receive no apps). */
+  unmatchedClients: number;
+  serverClasses: DsServerClassDto[];
+  apps: DsAppDto[];
+}

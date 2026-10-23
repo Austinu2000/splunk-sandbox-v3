@@ -38,3 +38,5 @@ export {
   ScenarioError,
   type Scenario,
 } from './scenario/engine';
+export { monitoringConsole } from './consoles/monitoring';
+export { dsClients, dsOverview, type DsClientQuery } from './ds/manage';

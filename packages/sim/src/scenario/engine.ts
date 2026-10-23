@@ -11,6 +11,13 @@ import { HEALTH_STATES } from '@sandbox/shared';
 import { summarizeFleet } from '../fleet/query';
 import { parsingQueueBlocked } from '../derive/state';
 import { mergesWithPrevious } from '../spl/data';
+import { BLOCKED, OFFLINE } from '../fleet/tables';
+import { forwarderInputs } from '../hosts/inputs';
+import { licenseStatus } from '../ingest/license';
+import { extractTime, parseConfig } from '../ingest/parsing';
+import { projectedSkips } from '../scheduler';
+import { clusterPeers } from '../hosts/cluster';
+import { splunkdRunning } from '../hosts/profile';
 
 const confCheck = z
   .object({
@@ -35,6 +42,25 @@ const breakingCheck = z
   .object({ host: z.string().min(1), sourcetype: z.string().min(1), separate: z.boolean() })
   .strict();
 
+const licenseCheck = z.object({ maxProjectedPct: z.number().positive() }).strict();
+const timestampCheck = z
+  .object({
+    /** A forwarder whose events of this sourcetype are sampled. */
+    host: z.string().min(1),
+    sourcetype: z.string().min(1),
+    maxSkewSeconds: z.number().nonnegative(),
+  })
+  .strict();
+const hostCheck = z.object({ host: z.string().min(1) }).strict();
+const collectingCheck = z.object({ host: z.string().min(1), source: z.string().startsWith('/') }).strict();
+const schedulerCheck = z
+  .object({
+    host: z.string().min(1),
+    maxSkipped: z.number().int().nonnegative(),
+    minutes: z.number().int().positive().max(240),
+  })
+  .strict();
+
 /**
  * Fix checks describe outcomes (the fleet recovered, the queue drains, events stay separate) so any
  * correct fix passes. `effectiveConf` remains for checks that really are about one setting.
@@ -45,7 +71,12 @@ export type FixCheck =
   | { effectiveConf: z.infer<typeof confCheck> }
   | { fleet: z.infer<typeof fleetCheck> }
   | { parsingQueue: z.infer<typeof queueCheck> }
-  | { eventBreaking: z.infer<typeof breakingCheck> };
+  | { eventBreaking: z.infer<typeof breakingCheck> }
+  | { license: z.infer<typeof licenseCheck> }
+  | { timestamps: z.infer<typeof timestampCheck> }
+  | { forwarderDelivering: z.infer<typeof hostCheck> }
+  | { collecting: z.infer<typeof collectingCheck> }
+  | { scheduler: z.infer<typeof schedulerCheck> };
 const check: z.ZodType<FixCheck> = z.lazy(() =>
   z.union([
     z.object({ all: z.array(check).min(1) }).strict(),
@@ -54,8 +85,43 @@ const check: z.ZodType<FixCheck> = z.lazy(() =>
     z.object({ fleet: fleetCheck }).strict(),
     z.object({ parsingQueue: queueCheck }).strict(),
     z.object({ eventBreaking: breakingCheck }).strict(),
+    z.object({ license: licenseCheck }).strict(),
+    z.object({ timestamps: timestampCheck }).strict(),
+    z.object({ forwarderDelivering: hostCheck }).strict(),
+    z.object({ collecting: collectingCheck }).strict(),
+    z.object({ scheduler: schedulerCheck }).strict(),
   ]),
 );
+
+const confChange = z
+  .object({
+    host: z.string(),
+    path: z.string().regex(/^\/opt\/splunk(?:forwarder)?\/etc\/.+\.conf$/),
+    stanza: z.string(),
+    set: z.record(z.string()).default({}),
+    unset: z.array(z.string()).default([]),
+    /** none: the file changes on disk only (e.g. the cluster manager's copy of the bundle). */
+    apply: z.enum(['restart', 'deploy-server', 'none']),
+  })
+  .strict();
+/** Ownership/permissions of an existing file outside Splunk's config (takes effect immediately). */
+const fileChange = z
+  .object({
+    host: z.string(),
+    file: z.string().regex(/^\/[\w./-]+$/),
+    mode: z.string().regex(/^0?[0-7]{3}$/),
+    owner: z
+      .string()
+      .regex(/^[a-z_][\w-]*$/)
+      .optional(),
+    group: z
+      .string()
+      .regex(/^[a-z_][\w-]*$/)
+      .optional(),
+  })
+  .strict();
+type Change = z.infer<typeof confChange> | z.infer<typeof fileChange>;
+const changePath = (c: Change) => ('path' in c ? c.path : c.file);
 
 /** A misleading but harmless log line written while the incident is open. */
 const redHerring = z
@@ -94,19 +160,8 @@ const schema = z
         text: z.string(),
       })
       .strict(),
-    changes: z
-      .array(
-        z
-          .object({
-            host: z.string(),
-            path: z.string().regex(/^\/opt\/splunk(?:forwarder)?\/etc\/.+\.conf$/),
-            stanza: z.string(),
-            set: z.record(z.string()),
-            apply: z.enum(['restart', 'deploy-server']),
-          })
-          .strict(),
-      )
-      .min(1),
+    /** Applied in order; several changes may edit the same file. Each host is restarted/reloaded once. */
+    changes: z.array(z.union([confChange, fileChange])).min(1),
     clues: z.array(z.string()),
     redHerrings: z.array(redHerring).default([]),
     fixChecks: check,
@@ -132,7 +187,12 @@ export function parseScenario(text: string): Scenario {
 }
 
 /** Edits a stanza while preserving unrelated settings and comments. */
-export function patchConf(text: string, stanza: string, values: Record<string, string>): string {
+export function patchConf(
+  text: string,
+  stanza: string,
+  values: Record<string, string>,
+  unset: string[] = [],
+): string {
   const lines = text.split(/\r?\n/);
   let inStanza = false,
     found = false,
@@ -149,8 +209,12 @@ export function patchConf(text: string, stanza: string, values: Record<string, s
       continue;
     }
     if (!inStanza) continue;
-    insertAt = i + 1;
     const key = /^\s*([^#=]+?)\s*=/.exec(lines[i]!)?.[1];
+    if (key && unset.includes(key)) {
+      lines.splice(i--, 1);
+      continue;
+    }
+    insertAt = i + 1;
     if (key && Object.hasOwn(values, key)) {
       lines[i] = `${key} = ${values[key]}`;
       seen.add(key);
@@ -176,6 +240,14 @@ export function configureScenarios(world: World, definitions: Scenario[]): void 
     if (ids.has(s.id)) throw new ScenarioError(`Duplicate scenario: ${s.id}`);
     ids.add(s.id);
     for (const c of s.changes) {
+      if ('file' in c) {
+        const p = resolveHost(world, c.host);
+        if (!p || p.os !== 'linux' || c.file.split('/').includes('..'))
+          throw new ScenarioError(`Invalid file change: ${c.host}:${c.file}`);
+        if (hostFs(world, p).findNode(c.file)?.type !== 'file')
+          throw new ScenarioError(`Missing file: ${c.file}`);
+        continue;
+      }
       const p = resolveHost(world, c.host);
       if (!p?.splunk || (c.apply === 'deploy-server' && p.role !== 'deployment_server'))
         throw new ScenarioError(`Invalid scenario host/application: ${c.host}`);
@@ -218,6 +290,35 @@ export function fixed(world: World, c: FixCheck): boolean {
     const sample = `${new Date(world.clock.now).toISOString()} INFO  [main] c.example.Probe - sample event`;
     return !!p && !mergesWithPrevious(world, p, sourcetype, world.clock.now, sample) === separate;
   }
+  if ('license' in c) return licenseStatus(world).projectedPct <= c.license.maxProjectedPct;
+  if ('timestamps' in c) {
+    // The newest event the forwarder wrote: does every running indexer stamp it near its write time?
+    const { host, sourcetype, maxSkewSeconds } = c.timestamps;
+    const p = resolveHost(world, host);
+    const input = p && forwarderInputs(world, p).collected.find((x) => x.sourcetype === sourcetype);
+    const entry = input?.log.entries(world.clock.now - 10 * 60_000, world.clock.now).at(-1);
+    if (!entry) return false;
+    const [t, raw] = entry;
+    return clusterPeers(world)
+      .filter((idx) => splunkdRunning(world, idx))
+      .every(
+        (idx) =>
+          Math.abs((extractTime(parseConfig(world, idx, sourcetype, t), raw) ?? t) - t) <=
+          maxSkewSeconds * 1000,
+      );
+  }
+  if ('forwarderDelivering' in c) {
+    const row = resolveHost(world, c.forwarderDelivering.host)?.fleetRow;
+    return row !== undefined && world.fleet.health[row] !== BLOCKED && world.fleet.health[row] !== OFFLINE;
+  }
+  if ('collecting' in c) {
+    const p = resolveHost(world, c.collecting.host);
+    return !!p && forwarderInputs(world, p).collected.some((x) => x.source === c.collecting.source);
+  }
+  if ('scheduler' in c) {
+    const p = resolveHost(world, c.scheduler.host);
+    return !!p?.splunk && projectedSkips(world, p, c.scheduler.minutes) <= c.scheduler.maxSkipped;
+  }
   const e = c.effectiveConf,
     p = resolveHost(world, e.host);
   return !!p?.splunk && setting(runningConf(world, p, e.conf), e.stanza, e.key) === e.equals;
@@ -235,19 +336,43 @@ export function startScenario(world: World, id: string): TicketDto {
     active.some((t) =>
       world.scenarios.definitions
         .find((d) => d.id === t.scenarioId)!
-        .changes.some((c) => s.changes.some((next) => c.host === next.host && c.path === next.path)),
+        .changes.some((c) =>
+          s.changes.some((next) => c.host === next.host && changePath(c) === changePath(next)),
+        ),
     )
   )
     throw new ScenarioError('An active incident uses the same config file');
-  // Prepare all writes before applying any changes.
-  const edits = s.changes.map((c) => {
+  // Prepare all writes before applying any changes; edits to one file accumulate.
+  const texts = new Map<string, { host: string; path: string; text: string }>();
+  for (const c of s.changes) {
+    if (!('path' in c)) continue;
+    const key = `${c.host}:${c.path}`;
+    const fs = hostFs(world, resolveHost(world, c.host)!);
+    const old = texts.get(key)?.text ?? (fs.findNode(c.path) ? fs.readFile(c.path, ROOT) : '');
+    texts.set(key, { host: c.host, path: c.path, text: patchConf(old, c.stanza, c.set, c.unset) });
+  }
+  for (const { host, path, text } of texts.values()) {
+    const fs = hostFs(world, resolveHost(world, host)!);
+    const created = !fs.findNode(path);
+    fs.writeFile(path, text, ROOT);
+    // A new file belongs to whoever owns the directory (the splunk user), as if they had written it.
+    const dir = fs.findNode(path.slice(0, path.lastIndexOf('/')))!;
+    if (created) fs.setMeta(path, { owner: dir.owner, group: dir.group, mode: 0o600 }, ROOT);
+  }
+  for (const c of s.changes) {
+    if (!('file' in c)) continue;
+    const fs = hostFs(world, resolveHost(world, c.host)!);
+    fs.setMeta(
+      c.file,
+      { mode: parseInt(c.mode, 8), ...(c.owner && { owner: c.owner }), ...(c.group && { group: c.group }) },
+      ROOT,
+    );
+  }
+  const applied = new Set<string>();
+  for (const c of s.changes) {
+    if (!('apply' in c) || c.apply === 'none' || applied.has(`${c.host}:${c.apply}`)) continue;
+    applied.add(`${c.host}:${c.apply}`);
     const p = resolveHost(world, c.host)!;
-    const fs = hostFs(world, p);
-    const old = fs.findNode(c.path) ? fs.readFile(c.path, ROOT) : '';
-    return { c, p, fs, text: patchConf(old, c.stanza, c.set) };
-  });
-  for (const { c, fs, text } of edits) fs.writeFile(c.path, text, ROOT);
-  for (const { c, p } of edits) {
     if (c.apply === 'deploy-server') reloadDeployServer(world, p);
     else restartSplunk(world, p);
   }

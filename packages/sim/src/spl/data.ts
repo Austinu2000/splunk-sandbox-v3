@@ -1,22 +1,23 @@
-import { runningConfAt } from '../hosts/running';
-import { setting } from '../conf/merge';
-import { confBool } from '../conf/parse';
-import { deployedApps } from '../derive/state';
+import {
+  extractTime,
+  MAX_SHIFT_MS,
+  mergesWithPrevious as mergeRule,
+  nullQueued,
+  parseConfig,
+} from '../ingest/parsing';
 import { hostname as fleetHostname } from '../fleet/query';
 import { BLOCKED, OFFLINE } from '../fleet/tables';
-import { CLASS_INPUTS, CLASS_LOG_FILE } from '../hosts/apps';
+import { forwarderInputs } from '../hosts/inputs';
 import { resolveHost, type HostProfile } from '../hosts/profile';
 import {
-  appLog,
   hostTimeline,
-  messagesLog,
   metricsLog,
   receivingIndexer,
-  secureLog,
+  licenseUsageLog,
+  schedulerLog,
   smallLog,
   splunkdLog,
   statesIn,
-  winEventLog,
   type LogSource,
   type Timeline,
 } from '../logs/sources';
@@ -77,6 +78,26 @@ export function hostSources(world: World, p: HostProfile, wantData: boolean): Sc
         source: `${logDir}health.log`,
         log: smallLog(world, p, 'health'),
       },
+      ...(p.role === 'search_head'
+        ? [
+            {
+              index: '_internal',
+              sourcetype: 'scheduler',
+              source: `${logDir}scheduler.log`,
+              log: schedulerLog(world, p),
+            },
+          ]
+        : []),
+      ...(p.role === 'license_manager'
+        ? [
+            {
+              index: '_internal',
+              sourcetype: 'splunkd',
+              source: `${logDir}license_usage.log`,
+              log: licenseUsageLog(world, p),
+            },
+          ]
+        : []),
       {
         index: '_audit',
         sourcetype: 'audittrail',
@@ -87,43 +108,9 @@ export function hostSources(world: World, p: HostProfile, wantData: boolean): Sc
   }
   if (!wantData || p.fleetRow === undefined) return out;
 
-  // Business data follows the apps the deployment server actually gave this forwarder.
-  const row = p.fleetRow;
-  const apps = deployedApps(world, p);
-  const own = world.config.serverClasses[world.fleet.serverClass[row]!]!;
-  if (own.os === 'linux' && apps.includes('Splunk_TA_nix')) {
-    out.push(
-      { index: 'os', sourcetype: 'syslog', source: '/var/log/messages', log: messagesLog(world, p) },
-      { index: 'os', sourcetype: 'linux_secure', source: '/var/log/secure', log: secureLog(world, p) },
-    );
-  }
-  const assigned = world.fleet.assignedClass[row]!;
-  const assignedCls = world.config.serverClasses[assigned];
-  if (!assignedCls) return out;
-  for (const input of CLASS_INPUTS[assignedCls.id]!.inputs) {
-    if (input.stanza.startsWith('WinEventLog://')) {
-      if (own.os !== 'windows') continue;
-      const name = input.stanza.slice('WinEventLog://'.length) as 'Security';
-      out.push({
-        index: input.index,
-        sourcetype: input.sourcetype,
-        source: `WinEventLog:${name}`,
-        log: winEventLog(world, p, name),
-      });
-    } else if (input.stanza.startsWith('monitor://')) {
-      // The monitored file only exists on hosts of the class it belongs to.
-      const file = CLASS_LOG_FILE[own.id];
-      if (assignedCls.id !== own.id || !file) continue;
-      const segment = Number(input.extra?.host_segment);
-      out.push({
-        index: input.index,
-        sourcetype: input.sourcetype,
-        source: file,
-        log: appLog(world, p, own.id),
-        host: segment ? file.split('/')[segment] : undefined,
-      });
-    }
-  }
+  // Business data: whatever this forwarder's effective inputs collect (see hosts/inputs.ts).
+  for (const c of forwarderInputs(world, p).collected)
+    out.push({ index: c.index, sourcetype: c.sourcetype, source: c.source, log: c.log, host: c.host });
   return out;
 }
 
@@ -163,7 +150,8 @@ export function delivered(tl: Timeline, t: number): boolean {
 /** Which indexer stored a host's event at time t (built once per host per scan). */
 function indexerFor(world: World, p: HostProfile): (t: number) => string {
   if (p.role === 'indexer') return () => p.hostname;
-  const site = world.infra.find((n) => n.role === 'indexer' && n.site === p.site)?.hostname ?? 'idx01';
+  const site =
+    world.infra.find((n) => n.role === 'indexer' && !n.retired && n.site === p.site)?.hostname ?? 'idx01';
   let fwd: ((t: number) => string | null) | null = null;
   return (t) => {
     if (p.fleetRow === undefined) return site;
@@ -227,23 +215,29 @@ export function scanEvents(
         continue;
       touched = true;
       stats.sources++;
-      const entries =
-        s.sourcetype === 'app:log'
-          ? parsedEntries(
-              world,
-              s,
-              s.log.entries(
-                Math.floor(earliest / 120_000) * 120_000 - 1,
-                Math.min(world.clock.now, Math.ceil(latest / 120_000) * 120_000),
-              ),
-              serverAt,
-            ).filter(([t]) => t > earliest && t <= latest)
-          : s.log.entries(earliest, latest);
+      // Forwarder file data is parsed on the receiving indexer; everything else arrives as written.
+      const parse = p.fleetRow !== undefined && s.source.startsWith('/') && parsingActive(world);
+      let entries: [eventTime: number, raw: string, indexTime: number][];
+      if (!parse)
+        entries = s.log.entries(earliest, Math.min(latest, world.clock.now)).map(([t, raw]) => [t, raw, t]);
+      else {
+        const shift = shiftPossible(world, s.sourcetype) ? MAX_SHIFT_MS : 0;
+        entries = parsedEntries(
+          world,
+          s,
+          s.log.entries(
+            Math.floor((earliest - shift) / 120_000) * 120_000 - 1,
+            Math.min(world.clock.now, Math.ceil((latest + shift) / 120_000) * 120_000),
+          ),
+          serverAt,
+        ).filter(([et]) => et > earliest && et <= latest);
+      }
       stats.scanned += entries.length;
-      for (const [t, raw] of entries) {
+      for (const [et, raw, t] of entries) {
         if (p.fleetRow !== undefined && !delivered(tl, t)) continue;
         const ev: SplEvent = {
-          time: t,
+          time: et,
+          indexTime: t,
           raw,
           host: s.host ?? p.hostname,
           source: s.source,
@@ -268,6 +262,26 @@ export function scanEvents(
   return stats;
 }
 
+/** Some receiver has restarted with its own config, so parsing may differ from how logs were written. */
+function parsingActive(world: World): boolean {
+  for (const host of world.hosts.revisions.keys()) {
+    const p = resolveHost(world, host);
+    if (p?.role === 'indexer' || p?.role === 'heavy_forwarder') return true;
+  }
+  return false;
+}
+
+/** Could any receiver's TZ setting (now or in a past revision) shift this sourcetype's timestamps? */
+function shiftPossible(world: World, st: string): boolean {
+  for (const [host, revisions] of world.hosts.revisions) {
+    const p = resolveHost(world, host);
+    if (!p?.splunk || (p.role !== 'indexer' && p.role !== 'heavy_forwarder')) continue;
+    for (const r of revisions)
+      if (parseConfig(world, p, st, Number.isFinite(r.time) ? r.time : 0).tzOffset !== null) return true;
+  }
+  return false;
+}
+
 /**
  * Whether the parsing tier (the receiving indexer's running props.conf at time t) would glue this
  * event onto the previous one: line merging on, and the LINE_BREAKER doesn't match before it.
@@ -279,36 +293,39 @@ export function mergesWithPrevious(
   t: number,
   raw: string,
 ): boolean {
-  const props = receiver?.splunk ? runningConfAt(world, receiver, 'props', t) : null;
-  if (!props || !confBool(setting(props, sourcetype, 'SHOULD_LINEMERGE'))) return false;
-  try {
-    return !new RegExp(setting(props, sourcetype, 'LINE_BREAKER') ?? '[\\r\\n]+').test('\n' + raw);
-  } catch {
-    return true; // an invalid breaker cannot split events
-  }
+  return !!receiver?.splunk && mergeRule(parseConfig(world, receiver, sourcetype, t), raw);
 }
 
-/** Parsing happens on the receiver; original source files remain intact. Grouping uses fixed
- * two-minute windows so changing the search range does not change event boundaries. */
+/**
+ * Index-time parsing on the receiver: nullQueue drops, timestamp extraction and line merging.
+ * Merging uses fixed two-minute windows so changing the search range does not change boundaries.
+ * Returns [eventTime, raw, indexTime].
+ */
 function parsedEntries(
   world: World,
   s: ScanSource,
   entries: [number, string][],
   serverAt: (t: number) => string,
-): [number, string][] {
-  if (s.sourcetype !== 'app:log') return entries;
-  const out: [number, string][] = [];
+): [number, string, number][] {
+  const out: [number, string, number][] = [];
   const groups = new Map<string, number>();
   for (const [t, raw] of entries) {
-    const receiver = serverAt(t);
-    const merge = mergesWithPrevious(world, resolveHost(world, receiver), s.sourcetype, t, raw);
-    const key = `${receiver}:${Math.floor(t / 120_000)}`;
+    const receiverName = serverAt(t);
+    const receiver = resolveHost(world, receiverName);
+    if (!receiver?.splunk) {
+      out.push([t, raw, t]);
+      continue;
+    }
+    const cfg = parseConfig(world, receiver, s.sourcetype, t);
+    if (nullQueued(cfg, raw)) continue;
+    const merge = mergeRule(cfg, raw);
+    const key = `${receiverName}:${Math.floor(t / 120_000)}`;
     const existing = groups.get(key);
     if (merge && existing !== undefined) out[existing]![1] += '\n' + raw;
     else {
       if (merge) groups.set(key, out.length);
-      out.push([t, raw]);
+      out.push([extractTime(cfg, raw) ?? t, raw, t]);
     }
   }
-  return out.sort((a, b) => a[0] - b[0]);
+  return out;
 }
