@@ -1,3 +1,6 @@
+import { runningConfAt } from '../hosts/running';
+import { setting } from '../conf/merge';
+import { confBool } from '../conf/parse';
 import { deployedApps } from '../derive/state';
 import { hostname as fleetHostname } from '../fleet/query';
 import { BLOCKED, OFFLINE } from '../fleet/tables';
@@ -224,7 +227,18 @@ export function scanEvents(
         continue;
       touched = true;
       stats.sources++;
-      const entries = s.log.entries(earliest, latest);
+      const entries =
+        s.sourcetype === 'app:log'
+          ? parsedEntries(
+              world,
+              s,
+              s.log.entries(
+                Math.floor(earliest / 120_000) * 120_000 - 1,
+                Math.min(world.clock.now, Math.ceil(latest / 120_000) * 120_000),
+              ),
+              serverAt,
+            ).filter(([t]) => t > earliest && t <= latest)
+          : s.log.entries(earliest, latest);
       stats.scanned += entries.length;
       for (const [t, raw] of entries) {
         if (p.fleetRow !== undefined && !delivered(tl, t)) continue;
@@ -252,4 +266,49 @@ export function scanEvents(
     if (touched) stats.hosts++;
   }
   return stats;
+}
+
+/**
+ * Whether the parsing tier (the receiving indexer's running props.conf at time t) would glue this
+ * event onto the previous one: line merging on, and the LINE_BREAKER doesn't match before it.
+ */
+export function mergesWithPrevious(
+  world: World,
+  receiver: HostProfile | null,
+  sourcetype: string,
+  t: number,
+  raw: string,
+): boolean {
+  const props = receiver?.splunk ? runningConfAt(world, receiver, 'props', t) : null;
+  if (!props || !confBool(setting(props, sourcetype, 'SHOULD_LINEMERGE'))) return false;
+  try {
+    return !new RegExp(setting(props, sourcetype, 'LINE_BREAKER') ?? '[\\r\\n]+').test('\n' + raw);
+  } catch {
+    return true; // an invalid breaker cannot split events
+  }
+}
+
+/** Parsing happens on the receiver; original source files remain intact. Grouping uses fixed
+ * two-minute windows so changing the search range does not change event boundaries. */
+function parsedEntries(
+  world: World,
+  s: ScanSource,
+  entries: [number, string][],
+  serverAt: (t: number) => string,
+): [number, string][] {
+  if (s.sourcetype !== 'app:log') return entries;
+  const out: [number, string][] = [];
+  const groups = new Map<string, number>();
+  for (const [t, raw] of entries) {
+    const receiver = serverAt(t);
+    const merge = mergesWithPrevious(world, resolveHost(world, receiver), s.sourcetype, t, raw);
+    const key = `${receiver}:${Math.floor(t / 120_000)}`;
+    const existing = groups.get(key);
+    if (merge && existing !== undefined) out[existing]![1] += '\n' + raw;
+    else {
+      if (merge) groups.set(key, out.length);
+      out.push([t, raw]);
+    }
+  }
+  return out.sort((a, b) => a[0] - b[0]);
 }

@@ -8,6 +8,7 @@ import { DOMAIN, resolveHost, type HostProfile } from '../hosts/profile';
 import {
   deploymentServer,
   runningConf,
+  runningConfAt,
   runningVfs,
   runtimeHooks,
   serviceState,
@@ -57,6 +58,7 @@ export interface DerivedState {
   phase: Uint32Array;
   /** Per outputs config: 1 if at least one server is reachable right now. */
   outputsOk: Uint8Array;
+  outputsBlocked: Uint8Array;
   /** Clients matched by each server class at the last deployment recompute. */
   classCounts: Record<string, number>;
 }
@@ -208,6 +210,7 @@ export function initDerived(world: World): DerivedState {
     constrained: new Uint8Array(n),
     phase,
     outputsOk: new Uint8Array(0),
+    outputsBlocked: new Uint8Array(0),
     classCounts: {},
   };
   world.derived = d;
@@ -269,9 +272,16 @@ function refreshLocal(world: World, row: number): void {
 export function refreshReachability(world: World): void {
   const d = world.derived;
   d.outputsOk = new Uint8Array(d.outputs.length);
-  d.outputs.forEach(
-    (o, i) => (d.outputsOk[i] = o.servers.some((s) => targetStatus(world, s).reachable) ? 1 : 0),
-  );
+  d.outputsBlocked = new Uint8Array(d.outputs.length);
+  d.outputs.forEach((o, i) => {
+    const targets = o.servers.map((s) => targetStatus(world, s));
+    d.outputsOk[i] = targets.some((t) => t.reachable) ? 1 : 0;
+    d.outputsBlocked[i] = targets.some(
+      (t) => t.reachable && t.host && parsingQueueBlocked(world, t.host, world.clock.now),
+    )
+      ? 1
+      : 0;
+  });
 }
 
 export function rowOutputsIndex(world: World, row: number): number {
@@ -291,6 +301,8 @@ function constraintFor(world: World, row: number): Constraint | null {
   const d = world.derived;
   if (d.stopped.has(row)) return { state: OFFLINE };
   if (!d.outputsOk[rowOutputsIndex(world, row)]) return { state: BLOCKED };
+  // Backpressure from a saturated receiver can fill its upstream output group.
+  if (d.outputsBlocked[rowOutputsIndex(world, row)]) return { state: BLOCKED };
   if (d.rowClass[row] !== world.fleet.serverClass[row])
     return { state: WRONG_CLASS, assigned: d.rowClass[row] };
   return null;
@@ -370,4 +382,14 @@ export function deployedAppFiles(world: World, app: string): Record<string, stri
     if (node.type === 'file') files[path.slice(dir.length + 1)] = vfs.readFile(path, ROOT);
   });
   return files;
+}
+
+/** Small queues saturate under the sandbox's steady indexing load. Sizes accept KB/MB/GB. */
+export function parsingQueueKB(world: World, p: HostProfile, at: number): number {
+  const value = setting(runningConfAt(world, p, 'server', at), 'queue=parsingQueue', 'maxSize') ?? '6MB';
+  const m = /^(\d+(?:\.\d+)?)\s*(KB|MB|GB)?$/i.exec(value);
+  return m ? Number(m[1]) * ({ KB: 1, MB: 1024, GB: 1048576 }[m[2]?.toUpperCase() ?? 'KB'] ?? 1) : 6144;
+}
+export function parsingQueueBlocked(world: World, p: HostProfile, at: number): boolean {
+  return p.role === 'indexer' && parsingQueueKB(world, p, at) < 512;
 }

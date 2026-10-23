@@ -1,4 +1,5 @@
 import type { CommandFn } from '../types';
+import { registerBinaries } from '../../vfs/build';
 import { viProgram, nanoProgram } from '../programs/editor';
 import { awk } from './awk';
 import { FILE_COMMANDS } from './files';
@@ -41,6 +42,8 @@ export const COMMAND_NAMES: readonly string[] = [
   'sudo',
   'su',
 ].sort();
+
+registerBinaries(COMMAND_NAMES);
 
 /** Commands that process input line by line and so can follow `tail -f |`. */
 export const STREAMABLE = new Set(LINE_FILTERS);

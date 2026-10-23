@@ -7,6 +7,7 @@ import { HealthHistory } from './fleet/history';
 import { allocFleet, type FleetTables } from './fleet/tables';
 import { generateInfra, type InfraNode } from './infra';
 import type { OverlayEntry } from './vfs/vfs';
+import { updateScenarios, type ScenarioState } from './scenario/engine';
 import type { ServiceState } from './hosts/running';
 import { applyConstraints, initDerived, type DerivedState } from './derive/state';
 import { hashString, Rng } from './rng';
@@ -34,6 +35,7 @@ export interface World {
   hosts: HostRuntime;
   /** Fleet behaviour derived from running config (deployment server mappings, output reachability). */
   derived: DerivedState;
+  scenarios: ScenarioState;
 }
 
 /** Per-host state created by user activity. Generated content is never stored, only changes to it. */
@@ -48,6 +50,7 @@ export interface HostRuntime {
   services: Map<string, ServiceState>;
   /** Bumped whenever any running config changes; caches key on it. */
   confVersion: number;
+  revisions: Map<string, { time: number; overlay: Map<string, OverlayEntry> }[]>;
 }
 
 export function createWorld(overrides: Partial<WorldConfig> = {}): World {
@@ -69,7 +72,9 @@ export function createWorld(overrides: Partial<WorldConfig> = {}): World {
       restartSnapshot: new Map(),
       services: new Map(),
       confVersion: 0,
+      revisions: new Map(),
     },
+    scenarios: { definitions: [], tickets: [], injected: [] },
     derived: null as unknown as DerivedState,
   };
   generateFleet(world);
@@ -98,6 +103,7 @@ export function tickWorld(world: World, n = 1): void {
     const rng = world.rng.fork('tick', tick);
     evolveFleet(world, rng, now);
     applyConstraints(world, rng.fork('constraints'), prev, now);
+    updateScenarios(world);
     world.history.prune(now - world.config.historyRetentionMs);
   }
 }

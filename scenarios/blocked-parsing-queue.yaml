@@ -1,0 +1,43 @@
+id: blocked-parsing-queue
+title: Dallas forwarders are backing up
+summary: >-
+  idx01's parsingQueue maxSize was set to 1KB in system/local/server.conf. The queue blocks, and the
+  backpressure blocks every Dallas forwarder whose output group includes idx01.
+topics: [indexing, queues]
+difficulty: medium
+trigger: { onDemand: true }
+ticket:
+  requester: Avery, Operations
+  persona: concerned
+  urgency: high
+  text: Dallas forwarders are reporting blocked output queues and indexing has slowed down. Nothing changed on the forwarders themselves.
+changes:
+  - host: idx01
+    path: /opt/splunk/etc/system/local/server.conf
+    stanza: 'queue=parsingQueue'
+    set: { maxSize: '1KB' }
+    apply: restart
+clues:
+  [
+    'idx01: metrics.log name=parsingqueue blocked=true',
+    'splunk btool server list --debug',
+    'Forwarder metrics.log tcpout queues',
+  ]
+redHerrings:
+  - host: idx02
+    file: splunkd
+    level: WARN
+    component: DiskMon
+    message: Minimum free disk space (5000MB) reached for /opt/splunk/var/run/splunk/dispatch. user=admin.
+    everyMinutes: 7
+  - host: idx01
+    file: messages
+    component: chronyd
+    message: System clock wrong by 1.204883 seconds, adjustment started
+    everyMinutes: 9
+# The queue drains and the Dallas fleet stops reporting blocked queues, whatever size fixed it.
+fixChecks:
+  all:
+    - parsingQueue: { host: idx01, blocked: false }
+    - fleet: { site: dal, health: blocked_queue, maxPct: 2 }
+recovery: { seconds: 30 }

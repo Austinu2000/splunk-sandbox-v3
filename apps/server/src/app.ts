@@ -1,7 +1,9 @@
+import { registerScenarios } from './scenarios';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { CLOCK_SPEEDS, HEALTH_STATES, type FleetFilter, type HostSortKey } from '@sandbox/shared';
 import {
   FilterError,
+  ScenarioError,
   listHosts,
   setClock,
   sshRoster,
@@ -38,9 +40,11 @@ export function buildApp(world: World, opts: { logger?: boolean } = {}): Sandbox
   const app = Fastify({ logger: opts.logger ?? false });
   const terminals = registerTerminal(app, world);
   registerSearch(app, world);
+  registerScenarios(app, world);
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
-    if (err instanceof FilterError || err.validation) return reply.code(400).send({ error: err.message });
+    if (err instanceof ScenarioError || err instanceof FilterError || err.validation)
+      return reply.code(400).send({ error: err.message });
     app.log.error(err);
     return reply.code(500).send({ error: 'Internal error' });
   });

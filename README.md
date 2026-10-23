@@ -6,7 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 
-**Status:** milestone 4 of 8: Fleet Overview, a simulated SSH terminal, a config layer where edits take effect only after the right restart or reload, and Search & Reporting with an SPL subset.
+**Status:** milestone 5 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, and a data-driven incident engine with tickets and three solution-tested incidents.
 
 ## Requirements
 
@@ -44,8 +44,8 @@ packages/sim      the simulated world: seeded RNG, fleet tables, health evolutio
                   .conf parser/btool, running config, config → fleet derivation,
                   SPL parser/executor and the indexed-event view (src/spl)
 apps/server       Fastify API, ticks the world in wall-clock time
-apps/web          React + Vite UI (Fleet Overview, Terminal, Search & Reporting)
-scenarios/        incident files (milestone 5+)
+apps/web          React + Vite UI (Fleet Overview, Terminal, Search & Reporting, Incidents & Tickets)
+scenarios/        validated YAML incidents
 ```
 
 ## How the fleet works (milestone 1)
@@ -163,6 +163,61 @@ What gets indexed follows the world:
 
 Typical full-scale times (35,000 forwarders, 15 minutes): fleet-wide `blocked=true` about 0.6 s, `log_level=WARN | stats count by component` about 1 s, `| metadata type=hosts index=_internal` about 2.5 s.
 
+## Incidents & Tickets (milestone 5)
+
+Open **Incidents & Tickets** and start an incident. Investigate with the fleet, search and terminal views, fix the cause, apply the right restart or reload, and close the ticket with a resolution note.
+
+**Nothing starts on its own.** Every incident is manual by default. A scenario file can opt in to a scheduled start with `trigger: { afterMinutes: N }`.
+
+**Limits:**
+- At most two tickets can be active at once.
+- Two scenarios that edit the same config file can't overlap.
+- Each incident can start once per session.
+- Tickets and world changes stay in memory until the server restarts. Saving sessions and resetting them is milestone 8.
+
+**What you see is the symptom, not the cause.**
+- Cards and tickets show the requester's view ("Dallas web access logs went quiet") and the difficulty only.
+- Each scenario's `summary` holds the root cause for authors and the future debrief. The API never returns it, nor the changes or fix checks.
+
+### Scenario files
+
+`scenarios/*.yaml` are read at server startup and checked with Zod. Writing a new incident means writing one file:
+
+| Field | Purpose |
+|---|---|
+| `title`, `ticket` | The symptom: what the requester reports |
+| `summary` | The root cause (hidden from the UI) |
+| `changes` | Stanza edits through the virtual filesystem, applied with `restart` or `deploy-server` (reload) |
+| `redHerrings` | Real log lines written to a host's `splunkd.log` or `/var/log/messages` every N minutes until the ticket closes. They are greppable and searchable like any other line. A forwarder with injected lines skips search gating, so search results stay exact. |
+| `fixChecks` | Outcomes, combinable with `all` / `any` |
+| `clues` | Notes for authors and hints |
+| `recovery` | Seconds the fix must hold before the ticket counts as resolved |
+
+**Fix checks test outcomes, so any correct fix passes:**
+- `fleet`: at most N% of a site or server class is in a given health state.
+- `parsingQueue`: whether an indexer's parsing queue is blocked.
+- `eventBreaking`: whether an indexer's running props keep consecutive events of a sourcetype separate.
+- `effectiveConf`: one exact running setting, for incidents where that really is the point.
+
+All checks read running state, so saving a file alone never resolves a ticket.
+
+**Ticket states:** open → recovering → resolved → closed. If the problem comes back before the ticket is closed, it reopens and the recovery timer resets.
+
+### The three incidents (spoilers)
+
+| Ticket | Cause | One correct fix |
+|---|---|---|
+| Dallas web access logs went quiet | `serverClass:linux_web` whitelist typo `dal-wbe-*` on ds01 | Fix the whitelist (`dal-web-*` or any pattern matching the Dallas web servers), then `splunk reload deploy-server` |
+| Dallas forwarders are backing up | idx01 `[queue=parsingQueue] maxSize = 1KB` in system/local/server.conf | Give the queue an adequate size (for example the 6MB default or more), then restart idx01 |
+| Application search results look jumbled | idx01 cluster props for `app:log` set to `SHOULD_LINEMERGE = true` with a `LINE_BREAKER` that never matches | Turn line merging off or restore a working `LINE_BREAKER`, then restart idx01 |
+
+Each has a solution-run test in `packages/sim/test/scenario.test.ts`, including alternative fixes. At 30×, recovery takes a few wall-clock seconds. Events indexed before a parsing fix stay merged, so check new data. The original application files always keep their individual lines.
+
+**Simulation limits:**
+- Line merging models an unmatched breaker in fixed two-minute windows on the receiving indexer. It isn't a full implementation of Splunk parsing.
+- Queues below 512KB saturate under the simulated steady load. Backpressure blocks the whole upstream output group, even when another receiver is reachable.
+- Monitoring Console alerts and cluster-bundle commands come in later milestones.
+
 ## API
 
 ### Fleet (milestone 1)
@@ -188,3 +243,12 @@ Typical full-scale times (35,000 forwarders, 15 minutes): fleet-wide `blocked=tr
 | POST | `/api/search/jobs` | `{ search, earliest?, latest? }`; runs synchronously and returns the job summary plus the first page of events and results |
 | GET | `/api/search/jobs/:sid/events` | `offset`, `count` (≤500) |
 | GET | `/api/search/jobs/:sid/results` | `offset`, `count` (≤500); the last 20 jobs are kept |
+
+### Incidents (milestone 5)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/scenarios` | Public catalog: id, symptom title, topics, difficulty (no cause, changes or fix checks) |
+| POST | `/api/scenarios/:id/start` | Apply an incident and open a ticket |
+| GET | `/api/tickets` | Tickets and current recovery status |
+| POST | `/api/tickets/:id/close` | `{ "note": "Root cause, fix, verification" }`; requires resolved state |

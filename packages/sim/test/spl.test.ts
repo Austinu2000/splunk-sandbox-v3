@@ -272,8 +272,10 @@ describe('events reflect the world', () => {
 
   it('gate pushdown never changes results', () => {
     const w = smallWorld('gates', 90);
-    const run = (s: string) => {
-      const r = q(w, s, '-5m');
+    // Full scans of every host's _internal are slow, so keep the windows short enough to finish well
+    // inside the 8 s search budget even when the whole suite runs in parallel.
+    const run = (s: string, window = '-5m') => {
+      const r = q(w, s, window);
       expect(r.scan!.truncated).toBe(false);
       return r;
     };
@@ -284,10 +286,11 @@ describe('events reflect the world', () => {
     );
     expect(pushed.results[0]!.get('n')).toBe(full.results[0]!.get('n'));
     expect(pushed.scan!.scanned).toBeLessThan(full.scan!.scanned / 5);
-    const warnPushed = run('index=_internal log_level=WARN | stats count').results[0]!.get('count');
-    const warnFull = run('index=_internal (log_level=WARN OR log_level=WARN) | stats count').results[0]!.get(
-      'count',
-    );
+    const warnPushed = run('index=_internal log_level=WARN | stats count', '-90s').results[0]!.get('count');
+    const warnFull = run(
+      'index=_internal (log_level=WARN OR log_level=WARN) | stats count',
+      '-90s',
+    ).results[0]!.get('count');
     expect(warnPushed).toBe(warnFull);
   }, 60_000);
 

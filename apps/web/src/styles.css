@@ -904,3 +904,137 @@ table.events {
     border-radius: 3px 0 0 3px;
   }
 }
+
+.tickets-page {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 32px;
+}
+.tickets-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.tickets-heading h1 {
+  margin-bottom: 6px;
+}
+.tickets-heading p,
+.ticket-requester,
+.ticket-eyebrow {
+  color: #657078;
+}
+.ticket-link {
+  color: #087c83;
+}
+.incident-catalog {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 24px 0 32px;
+}
+.incident-catalog article,
+.ticket-card,
+.ticket-empty {
+  background: white;
+  border: 1px solid #d6dce0;
+  border-radius: 4px;
+  padding: 22px;
+}
+.incident-catalog article {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.incident-catalog article button {
+  margin-top: auto;
+}
+.incident-catalog h2 {
+  font-size: 18px;
+  min-height: 48px;
+}
+.ticket-eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ticket-list {
+  display: grid;
+  gap: 18px;
+}
+.ticket-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  color: #657078;
+  font-size: 12px;
+}
+.ticket-status {
+  padding: 4px 9px;
+  border-radius: 3px;
+  background: #fff0d6;
+  color: #7e4d00;
+  text-transform: uppercase;
+}
+.status-resolved,
+.status-closed {
+  background: #e5f4e7;
+  color: #2c6939;
+}
+.status-recovering {
+  background: #e7f2fa;
+  color: #216383;
+}
+.ticket-card h3 {
+  margin-bottom: 6px;
+  font-size: 20px;
+}
+.ticket-card p {
+  line-height: 1.6;
+}
+.ticket-guidance {
+  background: #f3f6f7;
+  padding: 12px;
+  color: #53616b;
+}
+.ticket-card label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.ticket-card textarea {
+  width: 100%;
+  min-height: 90px;
+  padding: 10px;
+  border: 1px solid #b8c2c9;
+  border-radius: 3px;
+  font: inherit;
+  display: block;
+  margin-bottom: 10px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.tickets-page button {
+  background: #087c83;
+  color: white;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tickets-page button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+@media (max-width: 900px) {
+  .incident-catalog {
+    grid-template-columns: 1fr;
+  }
+  .tickets-page {
+    padding: 16px;
+  }
+  .incident-catalog h2 {
+    min-height: 0;
+  }
+}

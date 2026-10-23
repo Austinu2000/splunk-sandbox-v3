@@ -1,0 +1,38 @@
+id: event-line-breaking
+title: Application search results look jumbled
+summary: >-
+  idx01's cluster props for app:log were changed to SHOULD_LINEMERGE = true with a LINE_BREAKER that
+  never matches, so app:log events received by idx01 merge into multi-request events.
+topics: [parsing, props]
+difficulty: medium
+trigger: { onDemand: true }
+ticket:
+  requester: Mateo, Application Support
+  persona: methodical
+  urgency: medium
+  text: Some Dallas application search results contain several timestamped requests in one event. The original application log files look normal.
+changes:
+  - host: idx01
+    path: /opt/splunk/etc/peer-apps/_cluster/local/props.conf
+    stanza: 'app:log'
+    set: { SHOULD_LINEMERGE: 'true', LINE_BREAKER: '(NEVER_MATCH)' }
+    apply: restart
+clues:
+  [
+    'Compare index=app host=dal-app-0001 with its source file',
+    'idx01: splunk btool props list app:log --debug',
+  ]
+redHerrings:
+  - host: idx01
+    file: splunkd
+    level: WARN
+    component: DateParserVerbose
+    message: >-
+      A possible timestamp match (Fri Oct 23 08:12:44 2026) is outside of the acceptable time window. If this
+      timestamp is correct, consider adjusting MAX_DAYS_AGO and MAX_DAYS_HENCE. Context:
+      source=/var/log/mysql/mysqld.log|host=dal-db-0042|mysqld|
+    everyMinutes: 5
+# idx01 keeps consecutive app:log events apart, by whatever valid props change.
+fixChecks:
+  eventBreaking: { host: idx01, sourcetype: 'app:log', separate: true }
+recovery: { seconds: 30 }

@@ -165,3 +165,26 @@ export interface PageDto<T> {
   total: number;
   items: T[];
 }
+
+export interface ScenarioDto {
+  id: string;
+  title: string;
+  topics: string[];
+  difficulty: 'easy' | 'medium' | 'hard';
+}
+export interface TicketDto {
+  id: string;
+  scenarioId: string;
+  title: string;
+  requester: string;
+  persona: string;
+  urgency: 'low' | 'medium' | 'high';
+  text: string;
+  openedAt: number;
+  fixedAt?: number;
+  closedAt?: number;
+  status: 'open' | 'recovering' | 'resolved' | 'closed';
+  resolutionNote?: string;
+  /** The incident's fix checks have failed at least once (the symptom really appeared). */
+  symptomSeen?: boolean;
+}

@@ -80,6 +80,10 @@ export function systemDefaults(p: HostProfile, version: string): Record<string, 
       `[main]\nhomePath = $SPLUNK_DB/defaultdb/db\ncoldPath = $SPLUNK_DB/defaultdb/colddb\nthawedPath = $SPLUNK_DB/defaultdb/thaweddb\n\n` +
       `[_internal]\nhomePath = $SPLUNK_DB/_internaldb/db\ncoldPath = $SPLUNK_DB/_internaldb/colddb\nthawedPath = $SPLUNK_DB/_internaldb/thaweddb\nfrozenTimePeriodInSecs = 2592000\n\n` +
       `[_audit]\nhomePath = $SPLUNK_DB/audit/db\ncoldPath = $SPLUNK_DB/audit/colddb\nthawedPath = $SPLUNK_DB/audit/thaweddb\n`;
+    files['transforms.conf'] =
+      header(version, 'transforms.conf') +
+      `[syslog-host]\nDEST_KEY = MetaData:Host\nREGEX = :\\d\\d\\s+(?:\\d+\\s+|(?:user|daemon|local.?)\\.\\w+\\s+)*\\[?(\\w[\\w\\.\\-]{2,})\\]?\\s\nFORMAT = host::$1\n\n` +
+      `[access-extractions]\nREGEX = ^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] "(?<method>\\w+) (?<uri>\\S+)\n`;
     files['web.conf'] =
       header(version, 'web.conf') +
       `[settings]\nstartwebserver = 1\nhttpport = 8000\nmgmtHostPort = 127.0.0.1:8089\nenableSplunkWebSSL = false\n`;
@@ -104,6 +108,35 @@ export function clusterIndexesConf(): string {
   );
 }
 export const clusterIndexes = () => [...CLUSTER_INDEXES];
+
+/** Parsing settings distributed to the indexer cluster (the parsing tier for forwarder data). */
+export function clusterPropsConf(): string {
+  return [
+    '[app:log]',
+    'SHOULD_LINEMERGE = false',
+    'LINE_BREAKER = ([\\r\\n]+)\\d{4}-\\d{2}-\\d{2}T',
+    'TIME_PREFIX = ^',
+    'TIME_FORMAT = %Y-%m-%dT%H:%M:%S.%3N%Z',
+    'MAX_TIMESTAMP_LOOKAHEAD = 30',
+    'TRUNCATE = 20000',
+    '',
+    '[access_combined]',
+    'SHOULD_LINEMERGE = false',
+    '',
+    '[mysqld]',
+    'SHOULD_LINEMERGE = false',
+    'TIME_PREFIX = ^',
+    '',
+  ].join('\n');
+}
+
+/** The cluster bundle: files under manager-apps/ on the manager, peer-apps/ on each indexer. */
+export function clusterBundle(): Record<string, string> {
+  return {
+    '_cluster/local/indexes.conf': clusterIndexesConf(),
+    '_cluster/local/props.conf': clusterPropsConf(),
+  };
+}
 
 /** Files in etc/system/local for this host. */
 export function systemLocal(world: World, p: HostProfile): Record<string, string> {

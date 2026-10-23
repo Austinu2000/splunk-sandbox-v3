@@ -2,7 +2,7 @@ import { BLOCKED, HEALTHY, OFFLINE, STALE, WRONG_CLASS } from '../fleet/tables';
 import { throughputKBps } from '../fleet/health';
 import { CLASS_INPUTS, CLASS_LOG_FILE, classSourcetypes, NIX_INPUTS } from '../hosts/apps';
 import { DOMAIN, buildFor, splunkVersion, type HostProfile } from '../hosts/profile';
-import { NO_CLASS, rowOutputs, targetStatus } from '../derive/state';
+import { NO_CLASS, rowOutputs, targetStatus, parsingQueueBlocked, parsingQueueKB } from '../derive/state';
 import { hashString, mix32, unit } from '../rng';
 import type { World } from '../world';
 import { isoTs, splunkTs, syslogTs } from './format';
@@ -152,6 +152,33 @@ function shutdownLines(p: HostProfile, t: number): string[] {
   ];
 }
 
+type Injected = World['scenarios']['injected'][number];
+
+function hasInjected(world: World, p: HostProfile, file: Injected['file']): boolean {
+  return world.scenarios.injected.some((r) => r.host === p.hostname && r.file === file);
+}
+
+/** Red-herring lines from open incidents: every N minutes from the incident start until its ticket closes. */
+function injectedEntries(
+  world: World,
+  p: HostProfile,
+  file: Injected['file'],
+  t0: number,
+  t1: number,
+  format: (t: number, r: Injected) => string,
+): Entry[] {
+  const out: Entry[] = [];
+  for (const r of world.scenarios.injected) {
+    if (r.host !== p.hostname || r.file !== file) continue;
+    const until = world.scenarios.tickets.find((t) => t.id === r.ticketId)?.closedAt ?? Infinity;
+    const period = r.everyMinutes * 60_000;
+    periodic(Math.max(t0, r.from), Math.min(t1, until), period, (r.from + 7_000) % period, (t) =>
+      out.push([t, format(t, r)]),
+    );
+  }
+  return out;
+}
+
 const byTime = (entries: Entry[]) => entries.sort((a, b) => a[0] - b[0]);
 
 const ms = (p: HostProfile, t: number, salt: number) => mix32(p.hash, Math.floor(t / 1000), salt) % 1000;
@@ -229,10 +256,25 @@ export function splunkdLog(world: World, p: HostProfile): LogSource {
 
     if (p.fleetRow !== undefined) forwarderSplunkd(world, p, tl, t0, t1, push);
     else enterpriseSplunkd(world, p, tl, t0, t1, push);
+    out.push(
+      ...injectedEntries(
+        world,
+        p,
+        'splunkd',
+        t0,
+        t1,
+        (t, r) =>
+          `${splunkTs(t)} ${r.level.padEnd(5)} ${r.component} [${tid(p, 11)} ${r.component}Thread] - ${r.message}`,
+      ),
+    );
     return byTime(out);
   };
+  // Injected red-herring lines can contain any word, so gating is off for hosts that have them.
   const gate =
-    p.fleetRow === undefined ? undefined : (token: string) => FORWARDER_SPLUNKD_GATES[token] ?? null;
+    p.fleetRow === undefined
+      ? undefined
+      : (token: string) =>
+          hasInjected(world, p, 'splunkd') ? null : (FORWARDER_SPLUNKD_GATES[token] ?? null);
   return source(6 * 3_600_000, entries, gate);
 }
 
@@ -382,7 +424,7 @@ export function metricsLog(world: World, p: HostProfile): LogSource {
       const pre = `${splunkTs(t)} INFO  Metrics - `;
       const push = (l: string) => out.push([t, pre + l]);
       if (fwd) forwarderMetrics(world, p, fwd, t, k, state, push);
-      else enterpriseMetrics(p, t, k, push);
+      else enterpriseMetrics(world, p, t, k, push);
     });
     return out;
   };
@@ -443,15 +485,22 @@ function forwarderMetrics(
   });
 }
 
-function enterpriseMetrics(p: HostProfile, t: number, k: number, push: (l: string) => void) {
+function enterpriseMetrics(world: World, p: HostProfile, t: number, k: number, push: (l: string) => void) {
   const isIdx = p.role === 'indexer';
   const queues = isIdx
     ? ['parsingqueue', 'aggqueue', 'typingqueue', 'indexqueue']
     : ['parsingqueue', 'aggqueue'];
   for (const [i, q] of queues.entries())
-    push(queueLine(q, isIdx ? 6144 : 512, unit(p.hash, k, 0x50 + i) * 0.12, false));
+    push(
+      queueLine(
+        q,
+        isIdx ? parsingQueueKB(world, p, t) : 512,
+        parsingQueueBlocked(world, p, t) ? 1 : unit(p.hash, k, 0x50 + i) * 0.12,
+        parsingQueueBlocked(world, p, t),
+      ),
+    );
   if (isIdx) {
-    const kbps = 2400 + unit(p.hash, k, 0x55) * 1200;
+    const kbps = parsingQueueBlocked(world, p, t) ? 0 : 2400 + unit(p.hash, k, 0x55) * 1200;
     push(
       `group=thruput, name=index_thruput, instantaneous_kbps=${kbps.toFixed(3)}, instantaneous_eps=${(kbps * 3.8).toFixed(3)}, average_kbps=3000.000, total_k_processed=${Math.round(3000 * ((t - p.bootTime) / 1000))}, kb=${(kbps * 30).toFixed(3)}, ev=${Math.round(kbps * 3.8 * 30)}, load_average=${(4 + unit(p.hash, k, 0x56) * 6).toFixed(2)}`,
     );
@@ -464,7 +513,6 @@ function enterpriseMetrics(p: HostProfile, t: number, k: number, push: (l: strin
 
 /** /var/log/messages: cron, sessions, time sync. */
 export function messagesLog(world: World, p: HostProfile): LogSource {
-  void world;
   return source(24 * 3_600_000, (t0, t1) => {
     const out: Entry[] = [];
     periodic(t0, t1, 3_600_000, 61_000, (t) =>
@@ -487,6 +535,17 @@ export function messagesLog(world: World, p: HostProfile): LogSource {
         ]);
       else if (r < 0.07) out.push([t, `${syslogTs(t)} ${p.hostname} systemd[1]: Starting dnf makecache...`]);
     });
+    out.push(
+      ...injectedEntries(
+        world,
+        p,
+        'messages',
+        t0,
+        t1,
+        (t, r) =>
+          `${syslogTs(t)} ${p.hostname} ${r.component}[${2000 + (mix32(p.hash, 0x17) % 30000)}]: ${r.message}`,
+      ),
+    );
     return byTime(out);
   });
 }

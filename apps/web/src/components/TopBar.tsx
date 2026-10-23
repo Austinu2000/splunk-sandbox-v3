@@ -1,12 +1,13 @@
 import { CLOCK_SPEEDS, type ClockSpeed, type WorldInfo } from '@sandbox/shared';
 import { fmtClock } from '../format';
 
-export type Route = 'fleet' | 'terminal' | 'search';
+export type Route = 'fleet' | 'terminal' | 'search' | 'tickets';
 
 const NAV: { label: string; route?: Route; milestone?: number }[] = [
   { label: 'Fleet Overview', route: 'fleet' },
   { label: 'Terminal', route: 'terminal' },
   { label: 'Search & Reporting', route: 'search' },
+  { label: 'Incidents & Tickets', route: 'tickets' },
   { label: 'Monitoring Console', milestone: 6 },
   { label: 'Forwarder Management', milestone: 6 },
   { label: 'Settings', milestone: 6 },

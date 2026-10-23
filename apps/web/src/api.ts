@@ -1,5 +1,7 @@
 import type {
   ClockSpeed,
+  ScenarioDto,
+  TicketDto,
   FleetFilter,
   FleetSummary,
   HostPage,
@@ -34,6 +36,16 @@ function query(params: Record<string, string | number | undefined>): string {
 }
 
 export const api = {
+  scenarios: () => request<ScenarioDto[]>('/api/scenarios'),
+  tickets: () => request<TicketDto[]>('/api/tickets'),
+  startScenario: (id: string) =>
+    request<TicketDto>(`/api/scenarios/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  closeTicket: (id: string, note: string) =>
+    request<TicketDto>(`/api/tickets/${encodeURIComponent(id)}/close`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note }),
+    }),
   world: () => request<WorldInfo>('/api/world'),
   search: (req: SearchRequestDto) =>
     request<{

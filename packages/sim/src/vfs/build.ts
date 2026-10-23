@@ -1,5 +1,5 @@
 import { allDeploymentApps, CLASS_LOG_FILE, deploymentAppFiles } from '../hosts/apps';
-import { builtinApps, clusterIndexes, clusterIndexesConf, systemDefaults, systemLocal } from '../hosts/confs';
+import { builtinApps, clusterBundle, clusterIndexes, systemDefaults, systemLocal } from '../hosts/confs';
 import { BASTION_USER, DOMAIN, buildFor, sshRoster, splunkVersion, type HostProfile } from '../hosts/profile';
 import {
   appLog,
@@ -75,8 +75,14 @@ class TreeBuilder {
 /** Binaries in /usr/bin, one per simulated command. */
 export type Binaries = readonly string[];
 
+/** The shell registers its command names here, so every filesystem has the same /usr/bin. */
+let registeredBinaries: Binaries = [];
+export function registerBinaries(names: Binaries): void {
+  registeredBinaries = names;
+}
+
 /** Builds the generated (pre-overlay) filesystem for a host. Pure: same world state and host give the same tree. */
-export function buildHostTree(world: World, p: HostProfile, binaries: Binaries): FsDir {
+export function buildHostTree(world: World, p: HostProfile, binaries: Binaries = registeredBinaries): FsDir {
   const installTime = p.bootTime - (20 + (p.hash % 200)) * DAY;
   const b = new TreeBuilder(installTime);
   const at = (daysAgo: number, salt = 0) =>
@@ -200,12 +206,11 @@ export function buildHostTree(world: World, p: HostProfile, binaries: Binaries):
     for (const app of allDeploymentApps(world))
       addApp(world, b, `${S}/etc/deployment-apps/${app}`, app, { ...own, mtime: at(40, app.length) });
   if (p.role === 'indexer')
-    b.file(`${S}/etc/peer-apps/_cluster/local/indexes.conf`, clusterIndexesConf(), { ...own, mtime: at(40) });
+    for (const [rel, text] of Object.entries(clusterBundle()))
+      b.file(`${S}/etc/peer-apps/${rel}`, text, { ...own, mtime: at(40) });
   if (p.role === 'cluster_manager')
-    b.file(`${S}/etc/manager-apps/_cluster/local/indexes.conf`, clusterIndexesConf(), {
-      ...own,
-      mtime: at(40),
-    });
+    for (const [rel, text] of Object.entries(clusterBundle()))
+      b.file(`${S}/etc/manager-apps/${rel}`, text, { ...own, mtime: at(40) });
   if (p.role === 'license_manager')
     b.file(
       `${S}/etc/licenses/enterprise/corp-enterprise-500GB.lic`,
@@ -393,7 +398,7 @@ const cache = new WeakMap<World, Map<string, Cached>>();
  * The live filesystem for a host. Rebuilt when the fleet state that shapes it changes
  * (assigned server class, version), with the user's overlay re-applied on top.
  */
-export function hostFs(world: World, p: HostProfile, binaries: Binaries): Vfs {
+export function hostFs(world: World, p: HostProfile, binaries: Binaries = registeredBinaries): Vfs {
   let perWorld = cache.get(world);
   if (!perWorld) cache.set(world, (perWorld = new Map()));
   const signature =

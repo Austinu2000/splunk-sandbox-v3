@@ -90,6 +90,10 @@ function snapshotOverlay(world: World, host: string, filter?: (path: string) => 
     ? new Map([...prev].filter(([path]) => !filter(path)))
     : new Map<string, OverlayEntry>();
   for (const [path, entry] of overlay) if (!filter || filter(path)) next.set(path, structuredClone(entry));
+  let revisions = world.hosts.revisions.get(host);
+  if (!revisions)
+    world.hosts.revisions.set(host, (revisions = [{ time: -Infinity, overlay: structuredClone(prev) }]));
+  revisions.push({ time: world.clock.now, overlay: structuredClone(next) });
   world.hosts.restartSnapshot.set(host, next);
   world.hosts.confVersion++;
 }
@@ -146,4 +150,29 @@ function ensureFs(world: World, p: HostProfile): void {
 
 export function deploymentServer(world: World): HostProfile {
   return resolveHost(world, 'ds01')!;
+}
+
+/** Historical running config: re-indexing a past time range must not rewrite old events after a fix. */
+const historical = new WeakMap<World, Map<string, MergedConf>>();
+export function runningConfAt(world: World, p: HostProfile, conf: string, at: number): MergedConf {
+  const revision = world.hosts.revisions
+    .get(p.hostname)
+    ?.filter((r) => r.time <= at)
+    .at(-1);
+
+  let cache = historical.get(world);
+  if (!cache) historical.set(world, (cache = new Map()));
+  const key = `${p.hostname}:${conf}:${revision?.time ?? 'current'}:${world.hosts.confVersion}`;
+  let merged = cache.get(key);
+  if (!merged) {
+    merged = revision
+      ? loadConf(
+          vfsReader(new Vfs(buildHostTree(world, p, []), revision.overlay, () => at)),
+          p.splunk!.home,
+          conf,
+        )
+      : runningConf(world, p, conf);
+    cache.set(key, merged);
+  }
+  return merged;
 }

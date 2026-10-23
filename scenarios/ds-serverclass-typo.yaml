@@ -1,0 +1,41 @@
+id: ds-serverclass-typo
+title: Dallas web access logs went quiet
+summary: >-
+  A typo in the serverClass:linux_web whitelist on ds01 (dal-wbe-* instead of dal-web-*) unmapped every
+  Dallas web server from org_linux_web_inputs, so their nginx access logs stopped being collected.
+topics: [deployment-server, forwarder-management]
+difficulty: medium
+trigger: { onDemand: true }
+ticket:
+  requester: Priya, Web Platform
+  persona: impatient
+  urgency: high
+  text: Dallas web logs have gone quiet. The web services are up and serving traffic, but our access logs are missing from Splunk.
+changes:
+  - host: ds01
+    path: /opt/splunk/etc/system/local/serverclass.conf
+    stanza: 'serverClass:linux_web'
+    set: { whitelist.0: 'dal-wbe-*' }
+    apply: deploy-server
+clues:
+  [
+    'ds01: splunkd.log DeploymentServer client counts per server class',
+    'splunk btool serverclass list --debug',
+    'Fleet Overview: Dallas linux_web wrong server class',
+  ]
+redHerrings:
+  - host: ds01
+    file: splunkd
+    level: WARN
+    component: ClientSessionsManager
+    message: Client name=ash-win-2391 ip=10.20.73.4 phonehome delay of 412s exceeds 3x phoneHomeIntervalInSecs
+    everyMinutes: 6
+  - host: dal-web-0001
+    file: messages
+    component: nginx
+    message: '[warn] 2214#2214: *88231 an upstream response is buffered to a temporary file /var/cache/nginx/proxy_temp/7/31/0000004317'
+    everyMinutes: 4
+# Any fix that maps the Dallas web servers back to their inputs app passes.
+fixChecks:
+  fleet: { site: dal, serverClass: linux_web, health: wrong_serverclass, maxPct: 3 }
+recovery: { seconds: 30 }

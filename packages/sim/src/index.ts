@@ -27,3 +27,14 @@ export { resolveHost, sshRoster, DETAILED_HOSTS, type HostProfile, type RosterEn
 export { TerminalSession, type SessionOptions } from './shell/session';
 export { stripAnsi } from './shell/ansi';
 export { runSearch, rowToPlain, eventToPlain, type SearchOutcome, type SearchRequest } from './spl/run';
+
+export {
+  parseScenario,
+  configureScenarios,
+  startScenario,
+  closeTicket,
+  refreshTickets,
+  scenarioCatalog,
+  ScenarioError,
+  type Scenario,
+} from './scenario/engine';

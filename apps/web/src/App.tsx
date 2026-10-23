@@ -1,3 +1,4 @@
+import { TicketsPage } from './pages/TicketsPage';
 import { useEffect, useState } from 'react';
 import { api } from './api';
 import { TopBar, type Route } from './components/TopBar';
@@ -8,6 +9,7 @@ import { usePoll } from './usePoll';
 
 function routeFromHash(): Route {
   const h = window.location.hash;
+  if (h === '#/tickets') return 'tickets';
   if (h === '#/terminal') return 'terminal';
   if (h.startsWith('#/search')) return 'search';
   return 'fleet';
@@ -46,6 +48,7 @@ export function App() {
         </div>
       )}
       {world.data && route === 'fleet' && <FleetOverview world={world.data} />}
+      {world.data && route === 'tickets' && <TicketsPage world={world.data} />}
       {terminalOpened && <TerminalPage visible={route === 'terminal'} />}
       {searchOpened && <SearchPage visible={route === 'search'} />}
     </>

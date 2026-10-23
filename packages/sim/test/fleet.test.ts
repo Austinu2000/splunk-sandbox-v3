@@ -132,7 +132,7 @@ describe('fleet evolution', () => {
       expect(frac).toBeGreaterThan(0.007);
       expect(frac).toBeLessThan(0.03);
     }
-  });
+  }, 30_000); // ~2 s alone; slower when the whole suite runs in parallel
 
   it('keeps aggregates equal to a full scan after churn', () => {
     const w = createWorld({ seed: 'agg', fleetSize: 10_000 });
