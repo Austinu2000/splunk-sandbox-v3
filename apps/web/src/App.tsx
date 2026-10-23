@@ -10,6 +10,7 @@ import { MonitoringConsole, MC_TABS } from './pages/MonitoringConsole';
 import { ForwarderManagement, DS_TABS, type DsTab } from './pages/ForwarderManagement';
 import type { McView } from '@sandbox/shared';
 import { InterviewPage } from './pages/InterviewPage';
+import { SessionsPage } from './pages/SessionsPage';
 import { InterviewBar } from './components/InterviewBar';
 
 /** The page id recorded in the action log: the route plus its sub-view, without query strings. */
@@ -30,6 +31,7 @@ function routeFromHash(): Route {
   if (h.startsWith('#/monitoring')) return 'monitoring';
   if (h.startsWith('#/forwarders')) return 'forwarders';
   if (h.startsWith('#/interview')) return 'interview';
+  if (h.startsWith('#/sessions')) return 'sessions';
   if (h === '#/terminal') return 'terminal';
   if (h.startsWith('#/search')) return 'search';
   return 'fleet';
@@ -86,6 +88,15 @@ export function App() {
             MC_TABS.map((t) => t.view),
             'indexing',
           )}
+        />
+      )}
+      {world.data && route === 'sessions' && (
+        <SessionsPage
+          world={world.data}
+          onWorldChanged={() => {
+            void world.refresh();
+            void current.refresh();
+          }}
         />
       )}
       {world.data && route === 'interview' && (

@@ -5,8 +5,15 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `SPEC.md`: what we're building
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
+- [`docs/writing-scenarios.md`](docs/writing-scenarios.md): how to add a new incident
 
-**Status:** milestone 7 of 8: Fleet Overview, simulated SSH, running config, Search & Reporting, an incident engine with eight solution-tested incidents, the Monitoring Console, Forwarder Management, and interview mode with a timer, action log, rubric grader and debrief.
+**Status:** all 8 milestones are built:
+- Fleet Overview, simulated SSH and running config;
+- Search & Reporting;
+- an incident engine with eight solution-tested incidents;
+- the Monitoring Console and Forwarder Management;
+- interview mode with a timer, action log, rubric grader and debrief;
+- save, load and reset backed by SQLite.
 
 ## Requirements
 
@@ -26,6 +33,8 @@ Then open <http://127.0.0.1:5173>. The API server listens on `127.0.0.1:5174`, a
 | `SANDBOX_SEED` | `sandbox` | World seed. The same seed always gives the same world. |
 | `SANDBOX_FLEET_SIZE` | `35000` | Number of simulated forwarders |
 | `SANDBOX_PORT` | `5174` | API port |
+| `SANDBOX_DB` | `data/sandbox.db` | SQLite file for saved sessions, action logs and scores (git-ignored) |
+| `ANTHROPIC_API_KEY` | unset | Turns on optional Claude grading of interview answers. Nothing else uses the network. |
 
 ## Other commands
 
@@ -42,10 +51,15 @@ packages/shared   types shared by server and web
 packages/sim      the simulated world: seeded RNG, fleet tables, health evolution, queries,
                   host profiles, log generators, virtual filesystem, shell emulator,
                   .conf parser/btool, running config, config → fleet derivation,
-                  SPL parser/executor and the indexed-event view (src/spl)
-apps/server       Fastify API, ticks the world in wall-clock time
-apps/web          React + Vite UI (Fleet Overview, Terminal, Search & Reporting, Incidents & Tickets)
+                  SPL parser/executor and the indexed-event view (src/spl), scenario and
+                  interview engines, license and scheduler models, the journal and save/replay
+apps/server       Fastify API, ticks the world in wall-clock time, SQLite session store,
+                  optional Claude grading
+apps/web          React + Vite UI (Fleet Overview, Terminal, Search & Reporting, Incidents & Tickets,
+                  Interview, Monitoring Console, Forwarder Management, Sessions)
 scenarios/        validated YAML incidents
+docs/             writing-scenarios.md
+data/             the SQLite database (created on first run, git-ignored)
 ```
 
 ## How the fleet works (milestone 1)
@@ -172,8 +186,8 @@ Open **Incidents & Tickets** and start an incident. Investigate with the fleet, 
 **Limits:**
 - At most two tickets can be active at once.
 - Two scenarios that edit the same config file can't overlap.
-- Each incident can start once per session.
-- Tickets and world changes stay in memory until the server restarts. Saving sessions and resetting them is milestone 8.
+- Each incident can start once per world. A reset (see Sessions) makes them all available again.
+- Tickets and changes belong to the current world. Save it on the Sessions page to keep it (the server also autosaves).
 
 **What you see is the symptom, not the cause.**
 - Cards and tickets show the requester's view ("Dallas web access logs went quiet") and the difficulty only.
@@ -298,9 +312,41 @@ Hint costs are subtracted from the total.
 All eight incidents have one. Grading tests are in `packages/sim/test/interview.test.ts`, including a perfect-score run that fixes the incident with the simulated `vi`.
 
 **Limits:**
-- Interviews, tickets and the action log are in memory until the server restarts. SQLite persistence, reset and save are milestone 8.
-- Each incident can be used once per server session.
+- Each incident can be used once per world. After a reset, "Surprise me" prefers incidents you haven't submitted in any saved session.
 - Root-cause and communication scoring offline is keyword and heuristic matching. It can miss an unusual but correct phrasing; the Claude assessment is there for that.
+
+## Sessions: save, load and reset (milestone 8)
+
+Open **Sessions** (top right) to save the current world, load a saved one, or start over with any seed and fleet size.
+
+**How saving works.** Every change you make is journaled with the tick it happened on:
+- file edits and permission changes;
+- splunkd stops, starts, restarts and reloads (a cluster-bundle push records its file copies and restarts);
+- SSH logins;
+- incidents, tickets and interview steps;
+- the action log, including the Claude assessment.
+
+Searches and page views change nothing except the action log. Ticks are not journaled, because they are deterministic for a seed.
+
+A save is the seed, the fleet size, the tick and that journal. **Loading builds a fresh world from the seed and replays the journal tick by tick**, so it comes back exactly as it was, then carries on the same way. `packages/sim/test/save.test.ts` checks this. It builds a busy world, saves it, loads it, and compares:
+- fleet health and file overlays;
+- running config and services;
+- tickets, interviews and the action log;
+- license usage and search results;
+- the same again after 20 more ticks.
+
+**Storage.** SQLite (`better-sqlite3`, file in `SANDBOX_DB`):
+- `sessions` holds each save's journal, which is the source of truth;
+- `actions` and `interviews` are queryable copies of the action log and scores;
+- interview history and scores survive resets and restarts.
+
+The server **autosaves** to a single slot every minute when something changed, and again when it stops.
+
+**Loading** replays about one sim hour per second at full size (35,000 forwarders), so a day-long session takes roughly 25 seconds. The server is busy while it replays.
+
+**What load and reset replace:** open terminals close (reconnect for a new shell), and search jobs and console caches are cleared.
+
+**Writing new incidents.** See [`docs/writing-scenarios.md`](docs/writing-scenarios.md): a walkthrough of a scenario file, every change and check type, the interview block, and how to write the solution-run test.
 
 ## API
 
@@ -357,3 +403,13 @@ All eight incidents have one. Grading tests are in `packages/sim/test/interview.
 | PUT | `/api/interviews/:id/notes` | `{ notes }` (≤20,000 characters) |
 | POST | `/api/interviews/:id/submit` | `{ answer: { rootCause, fix, verification, prevention } }`; returns the debrief |
 | POST | `/api/actions/page` | `{ page }`: records a page view in the action log (the web app sends these) |
+
+### Sessions (milestone 8)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/sessions` | Saved sessions, interview history across them, the current world's change count, and whether saving is available |
+| POST | `/api/sessions` | `{ name }`: save the current world |
+| POST | `/api/sessions/:id/load` | Replace the current world with a saved one (replays its journal) |
+| DELETE | `/api/sessions/:id` | Delete a saved session |
+| POST | `/api/world/reset` | `{ seed?, fleetSize? }` (1,000–50,000): replace the current world with a fresh one |

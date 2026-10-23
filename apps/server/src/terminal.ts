@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
-import { logAction, TerminalSession, type World } from '@sandbox/sim';
+import { logAction, TerminalSession } from '@sandbox/sim';
+import type { LiveWorld } from './live';
 
 const MAX_SESSIONS = 8;
 const MAX_MESSAGE = 64 * 1024;
@@ -22,8 +23,16 @@ export function isLocalOrigin(origin: string | undefined): boolean {
  * /ws/term: one simulated terminal per connection. Messages are parsed as data and fed to the
  * shell emulator; nothing here (or in @sandbox/sim) starts a real process.
  */
-export function registerTerminal(app: FastifyInstance, world: World): { tickAll(): void; count(): number } {
+export function registerTerminal(
+  app: FastifyInstance,
+  live: LiveWorld,
+): { tickAll(): void; count(): number } {
   const sessions = new Set<TerminalSession>();
+  const sockets = new Set<{ close(code: number, reason: string): void }>();
+  // A terminal belongs to one world; when it's replaced (load or reset), its terminals close.
+  live.onSwap(() => {
+    for (const s of sockets) s.close(4000, 'world replaced');
+  });
   app.register(websocket, { options: { maxPayload: MAX_MESSAGE } });
   app.register(async (scope) => {
     scope.get('/ws/term', { websocket: true }, (socket, req) => {
@@ -36,6 +45,8 @@ export function registerTerminal(app: FastifyInstance, world: World): { tickAll(
         return;
       }
       const q = req.query as { cols?: string; rows?: string };
+      const world = live.world;
+      sockets.add(socket);
       const session = new TerminalSession({
         world,
         cols: Number(q.cols) || 80,
@@ -81,6 +92,7 @@ export function registerTerminal(app: FastifyInstance, world: World): { tickAll(
       socket.on('close', () => {
         session.dispose();
         sessions.delete(session);
+        sockets.delete(socket);
       });
     });
   });

@@ -4,7 +4,7 @@ import { buildApp } from '../src/app';
 import { isLocalOrigin } from '../src/terminal';
 
 const world = createWorld({ seed: 'ws-test', fleetSize: 3_000 });
-const { app, onTick } = buildApp(world);
+const { app, onTick, live } = buildApp(world);
 afterAll(() => app.close());
 
 type Msg = { type: string; data?: string; host?: string; user?: string };
@@ -37,6 +37,15 @@ async function connect(headers: Record<string, string> = {}) {
 }
 
 describe('/ws/term', () => {
+  it('closes terminals when the world is replaced (load or reset)', async () => {
+    const c = await connect();
+    await c.until(() => c.output().includes('[engineer@bastion01 ~]$'));
+    const closed = new Promise<number>((resolve) => c.ws.on('close', (code: number) => resolve(code)));
+    live.swap(createWorld({ seed: 'ws-test', fleetSize: 3_000 }));
+    expect(await closed).toBe(4000);
+    live.swap(world);
+  });
+
   it('runs a simulated shell over the socket and reports the location', async () => {
     const c = await connect();
     await c.until(() => c.output().includes('[engineer@bastion01 ~]$'));

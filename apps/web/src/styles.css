@@ -1311,3 +1311,38 @@ table.events {
     padding: 6px 16px;
   }
 }
+
+/* Sessions */
+.sys-link {
+  text-decoration: none;
+}
+.sys-link.active {
+  background: #5c6773;
+}
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 12px;
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+}
+.row-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.row-actions .link-btn {
+  margin-left: 12px;
+  padding: 0;
+}
+.link-btn.danger {
+  color: #c0392b;
+}
+.link-btn:disabled {
+  color: #b0b8c0;
+  cursor: default;
+}

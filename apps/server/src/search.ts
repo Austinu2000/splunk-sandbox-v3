@@ -1,13 +1,15 @@
+import type { LiveWorld } from './live';
 import type { FastifyInstance } from 'fastify';
 import type { PageDto, ResultValue, SearchEventDto, SearchJobDto } from '@sandbox/shared';
-import { eventToPlain, logAction, rowToPlain, runSearch, type SearchOutcome, type World } from '@sandbox/sim';
+import { eventToPlain, logAction, rowToPlain, runSearch, type SearchOutcome } from '@sandbox/sim';
 
 const MAX_JOBS = 20;
 
 /** Search jobs run synchronously in-process and are kept in memory for paging (most recent 20). */
-export function registerSearch(app: FastifyInstance, world: World): void {
+export function registerSearch(app: FastifyInstance, live: LiveWorld): void {
   const jobs = new Map<string, SearchOutcome>();
   let seq = 0;
+  live.onSwap(() => jobs.clear());
 
   const toDto = (sid: string, o: SearchOutcome): SearchJobDto => ({
     sid,
@@ -63,12 +65,12 @@ export function registerSearch(app: FastifyInstance, world: World): void {
     async (req) => {
       const { search, earliest = '-15m', latest = 'now' } = req.body;
       logAction(
-        world,
+        live.world,
         { kind: 'search', text: `${search} [earliest=${earliest} latest=${latest}]` },
         Date.now(),
       );
-      const outcome = runSearch(world, req.body);
-      const sid = `${Math.floor(world.clock.now / 1000)}.${++seq}`;
+      const outcome = runSearch(live.world, req.body);
+      const sid = `${Math.floor(live.world.clock.now / 1000)}.${++seq}`;
       jobs.set(sid, outcome);
       while (jobs.size > MAX_JOBS) jobs.delete(jobs.keys().next().value!);
       return {

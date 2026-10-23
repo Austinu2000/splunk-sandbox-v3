@@ -1,7 +1,8 @@
 import { CLOCK_SPEEDS, type ClockSpeed, type WorldInfo } from '@sandbox/shared';
 import { fmtClock } from '../format';
 
-export type Route = 'fleet' | 'terminal' | 'search' | 'tickets' | 'monitoring' | 'forwarders' | 'interview';
+export type Route =
+  'fleet' | 'terminal' | 'search' | 'tickets' | 'monitoring' | 'forwarders' | 'interview' | 'sessions';
 
 const NAV: { label: string; route?: Route; milestone?: number }[] = [
   { label: 'Fleet Overview', route: 'fleet' },
@@ -56,6 +57,9 @@ export function TopBar({
               <span className="seed" title="World seed">
                 seed: {world.seed}
               </span>
+              <a className={`sys-btn sys-link ${route === 'sessions' ? 'active' : ''}`} href="#/sessions">
+                Sessions
+              </a>
             </>
           )}
         </div>

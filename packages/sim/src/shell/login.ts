@@ -1,3 +1,4 @@
+import { journal } from '../journal';
 import { BASTION, BASTION_IP, BASTION_USER, resolveHost, type HostProfile } from '../hosts/profile';
 import { lastLoginTs } from '../logs/format';
 import { mix32 } from '../rng';
@@ -27,6 +28,7 @@ function lastLoginLine(world: World, p: HostProfile, from: string): string {
   const prev =
     world.hosts.lastLogin.get(p.hostname) ?? world.clock.now - (2 + (mix32(p.hash, 0x1a57) % 70)) * 3_600_000;
   world.hosts.lastLogin.set(p.hostname, world.clock.now);
+  journal(world, { k: 'login', host: p.hostname });
   return `Last login: ${lastLoginTs(prev)} from ${from}\n`;
 }
 

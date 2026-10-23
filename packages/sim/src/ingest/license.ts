@@ -1,3 +1,4 @@
+import { journal } from '../journal';
 import { rowOutputs, targetStatus } from '../derive/state';
 import { hostname as fleetHostname } from '../fleet/query';
 import { BLOCKED, OFFLINE } from '../fleet/tables';
@@ -83,7 +84,8 @@ export function computeLicenseRates(world: World, at = world.clock.now): Map<str
 
   // Hosts with their own running config, or whose files changed (permissions), are counted alone.
   const individual = new Set<number>(d.rowLocal.keys());
-  for (const host of world.hosts.fsOverlay.keys()) {
+  for (const [host, overlay] of world.hosts.fsOverlay) {
+    if (!overlay.size) continue;
     const p = resolveHost(world, host);
     if (p?.fleetRow !== undefined) individual.add(p.fleetRow);
   }
@@ -125,6 +127,8 @@ export function installLicenseHooks(): void {
 function snapshots(world: World): LicenseSnapshot[] {
   let list = history.get(world);
   if (!list) {
+    // History starts lazily; when a query starts it, journal that so a replay starts it at the same tick.
+    journal(world, { k: 'license.start' });
     list = [{ from: -Infinity, rates: computeLicenseRates(world) }];
     history.set(world, list);
   }
@@ -132,6 +136,11 @@ function snapshots(world: World): LicenseSnapshot[] {
 }
 
 /** Called each simulated minute by the world tick; a no-op until history has started. */
+/** Start license history now (replay of a journaled start). */
+export function startLicenseHistory(world: World): void {
+  snapshots(world);
+}
+
 export function recordLicense(world: World): void {
   const list = history.get(world);
   if (!list) return;

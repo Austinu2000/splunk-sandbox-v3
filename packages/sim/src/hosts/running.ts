@@ -1,3 +1,4 @@
+import { op } from '../journal';
 import { loadConf, type ConfReader, type MergedConf } from '../conf/merge';
 import { buildHostTree } from '../vfs/build';
 import { FsError, ROOT, Vfs, type Cred, type OverlayEntry } from '../vfs/vfs';
@@ -107,6 +108,10 @@ const notify = (world: World, p: HostProfile) => runtimeHooks.changed.forEach((h
 const announce = (world: World, p: HostProfile) => runtimeHooks.beforeChange.forEach((h) => h(world, p));
 
 export function stopSplunk(world: World, p: HostProfile): void {
+  op(world, { k: 'svc', host: p.hostname, op: 'stop' }, () => stop(world, p));
+}
+
+function stop(world: World, p: HostProfile): void {
   announce(world, p);
   const s = state(world, p.hostname);
   if (!s.running) return;
@@ -117,6 +122,10 @@ export function stopSplunk(world: World, p: HostProfile): void {
 }
 
 export function startSplunk(world: World, p: HostProfile): void {
+  op(world, { k: 'svc', host: p.hostname, op: 'start' }, () => start(world, p));
+}
+
+function start(world: World, p: HostProfile): void {
   announce(world, p);
   const s = state(world, p.hostname);
   if (s.running) return;
@@ -130,8 +139,10 @@ export function startSplunk(world: World, p: HostProfile): void {
 }
 
 export function restartSplunk(world: World, p: HostProfile): void {
-  stopSplunk(world, p);
-  startSplunk(world, p);
+  op(world, { k: 'svc', host: p.hostname, op: 'restart' }, () => {
+    stop(world, p);
+    start(world, p);
+  });
 }
 
 /** True for paths `splunk reload deploy-server` re-reads on a deployment server. */
@@ -141,6 +152,12 @@ export function isDeploymentPath(p: HostProfile, path: string): boolean {
 }
 
 export function reloadDeployServer(world: World, p: HostProfile, cls?: string): void {
+  op(world, { k: 'svc', host: p.hostname, op: 'reload', ...(cls !== undefined && { cls }) }, () =>
+    reload(world, p, cls),
+  );
+}
+
+function reload(world: World, p: HostProfile, cls?: string): void {
   announce(world, p);
   ensureFs(world, p);
   snapshotOverlay(world, p.hostname, (path) => isDeploymentPath(p, path));

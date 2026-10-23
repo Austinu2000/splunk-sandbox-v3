@@ -87,6 +87,8 @@ export class Vfs {
     readonly root: FsDir,
     private readonly overlay: Map<string, OverlayEntry>,
     private readonly now: () => number,
+    /** Told about every recorded change (the world journal listens here). */
+    private readonly onChange?: (path: string, entry: OverlayEntry) => void,
   ) {
     for (const [path, entry] of [...overlay.entries()].sort((a, b) => a[0].length - b[0].length))
       this.applyOverlay(path, entry);
@@ -115,6 +117,7 @@ export class Vfs {
 
   private record(path: string, entry: OverlayEntry): void {
     this.overlay.set(normalize(path), entry);
+    this.onChange?.(normalize(path), structuredClone(entry));
   }
 
   /** Lookup without permission checks. */

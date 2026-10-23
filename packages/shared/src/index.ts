@@ -290,6 +290,8 @@ export interface InterviewOptionsDto {
   topic?: string;
   difficulty?: 'easy' | 'medium' | 'hard';
   timeLimitMinutes?: number;
+  /** Incidents to pass over when picking one (practised in earlier sessions), if any others are left. */
+  avoid?: string[];
 }
 
 export interface InterviewAnswerDto {
@@ -382,7 +384,46 @@ export interface InterviewCatalogDto {
     title: string;
     topics: string[];
     difficulty: 'easy' | 'medium' | 'hard';
+    /** Already used in this world (can't be started again until a reset). */
     seen: boolean;
+    /** Submitted in an interview in any saved session. */
+    practised: boolean;
   }[];
   aiGrading: boolean;
+}
+
+// ---------------------------------------------------------------- Sessions (save, load, reset)
+
+export interface SavedSessionDto {
+  id: number;
+  name: string;
+  kind: 'manual' | 'autosave';
+  seed: string;
+  fleetSize: number;
+  tick: number;
+  simTime: number;
+  /** Wall-clock time of the save. */
+  savedAt: number;
+  interviews: number;
+  bestScore: number | null;
+}
+
+export interface InterviewHistoryDto {
+  scenarioId: string;
+  title: string;
+  difficulty: 'easy' | 'medium' | 'hard';
+  startedAt: number;
+  submittedAt: number;
+  total: number;
+  session: string;
+  sessionId: number;
+}
+
+export interface SessionInfoDto {
+  /** Whether saving is available (the server has a database). */
+  persistence: boolean;
+  /** User changes since the world was created or loaded. */
+  changes: number;
+  saves: SavedSessionDto[];
+  history: InterviewHistoryDto[];
 }

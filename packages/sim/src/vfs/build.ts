@@ -1,3 +1,4 @@
+import { journal } from '../journal';
 import { allDeploymentApps, deploymentAppFiles } from '../hosts/apps';
 import { hostDataFiles } from '../hosts/inputs';
 import {
@@ -24,7 +25,7 @@ import { mix32 } from '../rng';
 import { deployedAppFiles, deployedApps } from '../derive/state';
 import type { World } from '../world';
 import { basename, dirname, segments } from './path';
-import { Vfs, type FsDir, type FsFile, type NodeMeta } from './vfs';
+import { Vfs, type FsDir, type FsFile, type NodeMeta, type OverlayEntry } from './vfs';
 
 const DAY = 86_400_000;
 
@@ -425,6 +426,19 @@ function detailedHistory(p: HostProfile): string {
 
 // --- Cache ---
 
+/**
+ * Apply a recorded overlay change directly (replay). The host's cached filesystem is dropped and
+ * rebuilt from the generated tree plus the overlay on next use, which gives the same result.
+ */
+export function applyFsEntry(world: World, host: string, path: string, entry: OverlayEntry): void {
+  let overlay = world.hosts.fsOverlay.get(host);
+  if (!overlay) world.hosts.fsOverlay.set(host, (overlay = new Map()));
+  if (entry.kind === 'deleted')
+    for (const key of [...overlay.keys()]) if (key.startsWith(path + '/')) overlay.delete(key);
+  overlay.set(path, structuredClone(entry));
+  cache.get(world)?.delete(host);
+}
+
 interface Cached {
   signature: string;
   vfs: Vfs;
@@ -446,7 +460,12 @@ export function hostFs(world: World, p: HostProfile, binaries: Binaries = regist
   if (hit && hit.signature === signature) return hit.vfs;
   let overlay = world.hosts.fsOverlay.get(p.hostname);
   if (!overlay) world.hosts.fsOverlay.set(p.hostname, (overlay = new Map()));
-  const vfs = new Vfs(buildHostTree(world, p, binaries), overlay, () => world.clock.now);
+  const vfs = new Vfs(
+    buildHostTree(world, p, binaries),
+    overlay,
+    () => world.clock.now,
+    (path, entry) => journal(world, { k: 'fs', host: p.hostname, path, entry }),
+  );
   perWorld.set(p.hostname, { signature, vfs });
   return vfs;
 }

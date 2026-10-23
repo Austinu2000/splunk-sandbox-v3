@@ -51,3 +51,6 @@ export {
   takeHint,
   type InterviewRecord,
 } from './interview/engine';
+export { attachAiAssessment } from './interview/engine';
+export { loadWorld, saveWorld, SaveError, SAVE_VERSION, type SavedWorld } from './save';
+export type { Mutation } from './journal';

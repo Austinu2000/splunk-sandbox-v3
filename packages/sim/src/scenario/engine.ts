@@ -1,3 +1,4 @@
+import { op } from '../journal';
 import { z } from 'zod';
 import { parse } from 'yaml';
 import type { ScenarioDto, TicketDto } from '@sandbox/shared';
@@ -394,6 +395,10 @@ export function fixed(world: World, c: FixCheck): boolean {
 }
 
 export function startScenario(world: World, id: string): TicketDto {
+  return op(world, { k: 'scenario.start', id }, () => applyScenario(world, id));
+}
+
+function applyScenario(world: World, id: string): TicketDto {
   const s = world.scenarios.definitions.find((s) => s.id === id);
   if (!s) throw new ScenarioError('Unknown scenario');
   if (world.scenarios.tickets.some((t) => t.scenarioId === id))
@@ -496,6 +501,10 @@ export function refreshTickets(world: World): void {
   }
 }
 export function closeTicket(world: World, id: string, note: string): TicketDto {
+  return op(world, { k: 'ticket.close', id, note }, () => close(world, id, note));
+}
+
+function close(world: World, id: string, note: string): TicketDto {
   refreshTickets(world);
   const t = world.scenarios.tickets.find((t) => t.id === id);
   if (!t) throw new ScenarioError('Unknown ticket');

@@ -100,10 +100,15 @@ export function TerminalPage({ visible }: { visible: boolean }) {
       if (msg.type === 'output') t.write(msg.data);
       else if (msg.type === 'location') setLocation(`${msg.user}@${msg.host}`);
     };
-    socket.onclose = () => {
+    socket.onclose = (ev) => {
       if (!live()) return;
       setStatus('closed');
-      t.write('\r\n\x1b[33m[disconnected from the sandbox server]\x1b[0m\r\n');
+      // 4000: the server loaded a saved session or reset the world; this shell belonged to the old one.
+      t.write(
+        ev.code === 4000
+          ? '\r\n\x1b[33m[the world was replaced (session loaded or reset): reconnect for a new shell]\x1b[0m\r\n'
+          : '\r\n\x1b[33m[disconnected from the sandbox server]\x1b[0m\r\n',
+      );
     };
     return () => {
       if (ws.current === socket) ws.current = null;

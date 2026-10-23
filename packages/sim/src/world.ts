@@ -1,3 +1,4 @@
+import { nested, newJournal, type Journal } from './journal';
 import type { ActionDto } from '@sandbox/shared';
 import type { InterviewRecord } from './interview/engine';
 import type { WorldInfo } from '@sandbox/shared';
@@ -42,6 +43,8 @@ export interface World {
   /** Everything the user did (commands, searches, pages, hints), in order. */
   actions: ActionDto[];
   interviews: InterviewRecord[];
+  /** Every user change, by tick: what save stores and load replays. */
+  journal: Journal;
 }
 
 /** Per-host state created by user activity. Generated content is never stored, only changes to it. */
@@ -84,6 +87,7 @@ export function createWorld(overrides: Partial<WorldConfig> = {}): World {
     scenarios: { definitions: [], tickets: [], injected: [] },
     actions: [],
     interviews: [],
+    journal: newJournal(),
     derived: null as unknown as DerivedState,
   };
   generateFleet(world);
@@ -103,19 +107,24 @@ function historyCapacity(world: World): number {
 
 /** Advances the simulation by `n` ticks. Results depend only on the seed and the tick number. */
 export function tickWorld(world: World, n = 1): void {
-  for (let k = 0; k < n; k++) {
-    const tick = world.clock.tick + 1;
-    const now = world.config.startTime + tick * world.config.tickMs;
-    const prev = world.clock.now;
-    world.clock.tick = tick;
-    world.clock.now = now;
-    const rng = world.rng.fork('tick', tick);
-    evolveFleet(world, rng, now);
-    applyConstraints(world, rng.fork('constraints'), prev, now);
-    if (Math.floor(prev / 60_000) !== Math.floor(now / 60_000)) recordLicense(world);
-    updateScenarios(world);
-    world.history.prune(now - world.config.historyRetentionMs);
-  }
+  // Ticks are deterministic, so nothing they do is journaled (replay re-runs them).
+  nested(world, () => {
+    for (let k = 0; k < n; k++) tickOnce(world);
+  });
+}
+
+function tickOnce(world: World): void {
+  const tick = world.clock.tick + 1;
+  const now = world.config.startTime + tick * world.config.tickMs;
+  const prev = world.clock.now;
+  world.clock.tick = tick;
+  world.clock.now = now;
+  const rng = world.rng.fork('tick', tick);
+  evolveFleet(world, rng, now);
+  applyConstraints(world, rng.fork('constraints'), prev, now);
+  if (Math.floor(prev / 60_000) !== Math.floor(now / 60_000)) recordLicense(world);
+  updateScenarios(world);
+  world.history.prune(now - world.config.historyRetentionMs);
 }
 
 export function setClock(world: World, patch: { speed?: number; paused?: boolean }): void {

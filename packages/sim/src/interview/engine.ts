@@ -1,5 +1,7 @@
+import { op } from '../journal';
 import type {
   ActionDto,
+  AiAssessmentDto,
   ActionKind,
   DebriefDto,
   DimensionScoreDto,
@@ -38,6 +40,14 @@ export interface InterviewRecord extends InterviewDto {
 // ---------------------------------------------------------------- action log
 
 export function logAction(
+  world: World,
+  a: { kind: ActionKind; text: string; host?: string; user?: string },
+  wallTime: number,
+): ActionDto {
+  return op(world, { k: 'action', ...a, wall: wallTime }, () => appendAction(world, a, wallTime));
+}
+
+function appendAction(
   world: World,
   a: { kind: ActionKind; text: string; host?: string; user?: string },
   wallTime: number,
@@ -122,7 +132,11 @@ function seen(world: World, id: string): boolean {
   return world.scenarios.tickets.some((t) => t.scenarioId === id);
 }
 
-export function interviewCatalog(world: World, aiGrading: boolean): InterviewCatalogDto {
+export function interviewCatalog(
+  world: World,
+  aiGrading: boolean,
+  practised: string[] = [],
+): InterviewCatalogDto {
   const list = interviewable(world);
   return {
     topics: [...new Set(list.flatMap((s) => s.topics))].sort(),
@@ -132,6 +146,7 @@ export function interviewCatalog(world: World, aiGrading: boolean): InterviewCat
       topics: s.topics,
       difficulty: s.difficulty,
       seen: seen(world, s.id),
+      practised: practised.includes(s.id),
     })),
     aiGrading,
   };
@@ -142,6 +157,10 @@ function current(world: World): InterviewRecord | undefined {
 }
 
 export function startInterview(world: World, opts: InterviewOptionsDto, wallNow: number): InterviewRecord {
+  return op(world, { k: 'interview.start', opts, wall: wallNow }, () => begin(world, opts, wallNow));
+}
+
+function begin(world: World, opts: InterviewOptionsDto, wallNow: number): InterviewRecord {
   if (current(world)) throw new ScenarioError('Finish the running interview first');
   if (world.scenarios.tickets.some((t) => t.status !== 'closed'))
     throw new ScenarioError(
@@ -157,6 +176,9 @@ export function startInterview(world: World, opts: InterviewOptionsDto, wallNow:
   if (opts.topic) pool = pool.filter((s) => s.topics.includes(opts.topic!));
   if (opts.difficulty) pool = pool.filter((s) => s.difficulty === opts.difficulty);
   if (!pool.length) throw new ScenarioError('No unseen incident matches that topic and difficulty');
+  // Prefer incidents not practised in earlier sessions, when any are left.
+  const fresh = pool.filter((s) => !opts.avoid?.includes(s.id));
+  if (fresh.length) pool = fresh;
   // Deterministic for a seed and a session's history, without consuming the world RNG.
   const pick = pool[hashString(`${world.config.seed}:interview:${world.interviews.length}`) % pool.length]!;
   const spec = pick.interview;
@@ -196,6 +218,10 @@ function specFor(world: World, i: InterviewRecord): InterviewSpec {
 }
 
 export function takeHint(world: World, id: string, wallNow: number): InterviewRecord {
+  return op(world, { k: 'interview.hint', id, wall: wallNow }, () => hint(world, id, wallNow));
+}
+
+function hint(world: World, id: string, wallNow: number): InterviewRecord {
   const i = running(world, id);
   const hint = specFor(world, i).hints[i.hintsUsed.length];
   if (!hint) throw new ScenarioError('No more hints for this incident');
@@ -205,6 +231,10 @@ export function takeHint(world: World, id: string, wallNow: number): InterviewRe
 }
 
 export function saveNotes(world: World, id: string, notes: string): InterviewRecord {
+  return op(world, { k: 'interview.notes', id, notes }, () => notesFor(world, id, notes));
+}
+
+function notesFor(world: World, id: string, notes: string): InterviewRecord {
   const i = running(world, id);
   if (notes.length > 20_000) throw new ScenarioError('Notes are limited to 20,000 characters');
   i.notes = notes;
@@ -219,6 +249,12 @@ export function submitInterview(
   answer: InterviewAnswerDto,
   wallNow: number,
 ): InterviewRecord {
+  return op(world, { k: 'interview.submit', id, answer, wall: wallNow }, () =>
+    submit(world, id, answer, wallNow),
+  );
+}
+
+function submit(world: World, id: string, answer: InterviewAnswerDto, wallNow: number): InterviewRecord {
   const i = running(world, id);
   const fields = ['rootCause', 'fix', 'verification', 'prevention'] as const;
   for (const f of fields)
@@ -430,6 +466,21 @@ export function grade(world: World, i: InterviewRecord, wallNow: number): Debrie
     modelAnswer: spec.modelAnswer,
     spokenAnswer: spec.spokenAnswer,
   };
+}
+
+/** Store the optional Claude assessment on a submitted interview's debrief (journaled: it can't be recomputed offline). */
+export function attachAiAssessment(
+  world: World,
+  id: string,
+  result: { ai?: AiAssessmentDto; aiError?: string },
+): InterviewRecord {
+  return op(world, { k: 'interview.ai', id, ...result }, () => {
+    const i = world.interviews.find((x) => x.id === id);
+    if (!i?.debrief) throw new ScenarioError('Unknown or unsubmitted interview');
+    if (result.ai) i.debrief.ai = result.ai;
+    if (result.aiError) i.debrief.aiError = result.aiError;
+    return i;
+  });
 }
 
 export function interviewDto(i: InterviewRecord): InterviewDto {

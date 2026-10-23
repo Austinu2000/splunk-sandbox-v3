@@ -1,4 +1,5 @@
-import { tickWorld, type World } from '@sandbox/sim';
+import { tickWorld } from '@sandbox/sim';
+import type { LiveWorld } from './live';
 
 /**
  * Advances the world in wall-clock time. At speed 1 one tick (10 s of sim time by default) runs every
@@ -8,20 +9,20 @@ export class SimTicker {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly world: World,
+    private readonly live: LiveWorld,
     private readonly onTick: () => void = () => {},
   ) {}
 
   start(): void {
     if (this.timer) return;
     const loop = () => {
-      if (!this.world.clock.paused) {
-        tickWorld(this.world);
+      if (!this.live.world.clock.paused) {
+        tickWorld(this.live.world);
         this.onTick();
       }
-      this.timer = setTimeout(loop, this.world.config.tickMs / this.world.clock.speed);
+      this.timer = setTimeout(loop, this.live.world.config.tickMs / this.live.world.clock.speed);
     };
-    this.timer = setTimeout(loop, this.world.config.tickMs / this.world.clock.speed);
+    this.timer = setTimeout(loop, this.live.world.config.tickMs / this.live.world.clock.speed);
   }
 
   stop(): void {

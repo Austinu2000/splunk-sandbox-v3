@@ -1,8 +1,13 @@
-import { registerScenarios } from './scenarios';
+import { loadScenarioDefinitions, registerScenarios } from './scenarios';
+import { LiveWorld } from './live';
+import { registerSessions } from './sessions';
+import type { SessionStore } from './store';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { CLOCK_SPEEDS, HEALTH_STATES, type FleetFilter, type HostSortKey } from '@sandbox/shared';
 import {
+  configureScenarios,
   FilterError,
+  SaveError,
   ScenarioError,
   listHosts,
   setClock,
@@ -35,6 +40,8 @@ function toFilter(q: FilterQuery): FleetFilter {
 
 export interface SandboxApp {
   app: FastifyInstance;
+  /** The current world (replaced by load and reset). */
+  live: LiveWorld;
   /** Call after each simulation tick so live terminal programs (tail -f) update. */
   onTick(): void;
 }
@@ -43,22 +50,37 @@ export interface AppOptions {
   logger?: boolean;
   /** Claude grading for interviews; defaults to on only when ANTHROPIC_API_KEY is set. */
   aiGrader?: AiGrader | null;
+  /** Session database for save/load; null disables saving. */
+  store?: SessionStore | null;
 }
 
 export function buildApp(world: World, opts: AppOptions = {}): SandboxApp {
   const app = Fastify({ logger: opts.logger ?? false });
-  const terminals = registerTerminal(app, world);
-  registerSearch(app, world);
-  registerScenarios(app, world);
-  registerConsoles(app, world);
+  const definitions = world.scenarios.definitions.length
+    ? world.scenarios.definitions
+    : loadScenarioDefinitions();
+  if (!world.scenarios.definitions.length) configureScenarios(world, definitions);
+  const live = new LiveWorld(world);
+  const store = opts.store ?? null;
+  const terminals = registerTerminal(app, live);
+  registerSearch(app, live);
+  registerScenarios(app, live);
+  registerConsoles(app, live);
   registerInterview(
     app,
-    world,
+    live,
     opts.aiGrader !== undefined ? opts.aiGrader : aiGradingEnabled() ? createAiGrader() : null,
+    () => store?.practisedScenarios() ?? [],
   );
+  registerSessions(app, live, definitions, store);
 
   app.setErrorHandler((err: Error & { validation?: unknown }, _req, reply) => {
-    if (err instanceof ScenarioError || err instanceof FilterError || err.validation)
+    if (
+      err instanceof ScenarioError ||
+      err instanceof FilterError ||
+      err instanceof SaveError ||
+      err.validation
+    )
       return reply.code(400).send({ error: err.message });
     app.log.error(err);
     return reply.code(500).send({ error: 'Internal error' });
@@ -66,9 +88,9 @@ export function buildApp(world: World, opts: AppOptions = {}): SandboxApp {
 
   app.get('/api/health', async () => ({ ok: true }));
 
-  app.get('/api/world', async () => worldInfo(world));
+  app.get('/api/world', async () => worldInfo(live.world));
 
-  app.get('/api/hosts/roster', async () => sshRoster(world));
+  app.get('/api/hosts/roster', async () => sshRoster(live.world));
 
   app.post<{ Body: { paused?: boolean; speed?: number } }>(
     '/api/world/clock',
@@ -82,15 +104,15 @@ export function buildApp(world: World, opts: AppOptions = {}): SandboxApp {
       },
     },
     async (req) => {
-      setClock(world, req.body);
-      return worldInfo(world);
+      setClock(live.world, req.body);
+      return worldInfo(live.world);
     },
   );
 
   app.get<{ Querystring: FilterQuery }>(
     '/api/fleet/summary',
     { schema: { querystring: { type: 'object', properties: filterProps } } },
-    async (req) => summarizeFleet(world, toFilter(req.query)),
+    async (req) => summarizeFleet(live.world, toFilter(req.query)),
   );
 
   app.get<{ Querystring: HostsQuery }>(
@@ -115,9 +137,9 @@ export function buildApp(world: World, opts: AppOptions = {}): SandboxApp {
     },
     async (req) => {
       const { offset, limit, sort, dir } = req.query;
-      return listHosts(world, toFilter(req.query), { offset, limit, sort, dir });
+      return listHosts(live.world, toFilter(req.query), { offset, limit, sort, dir });
     },
   );
 
-  return { app, onTick: () => terminals.tickAll() };
+  return { app, live, onTick: () => terminals.tickAll() };
 }
