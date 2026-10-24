@@ -6,6 +6,7 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - `PLAN.md`: architecture, data models, risks
 - `CLAUDE.md`: rules every change must follow
 - [`docs/writing-scenarios.md`](docs/writing-scenarios.md): how to add a new incident
+- [`docs/roadmap.md`](docs/roadmap.md): what's left to build, known issues, and how to check against a real Splunk install
 
 **Status:** all 8 milestones are built:
 - Fleet Overview, simulated SSH and running config;
