@@ -3,3 +3,12 @@ dist
 *.sqlite
 .DS_Store
 data/
+
+.env
+.env.*
+!.env.example
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key

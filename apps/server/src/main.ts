@@ -9,7 +9,7 @@ import { SimTicker } from './ticker';
 
 // Local only (CLAUDE.md rule 6): never bind to anything but loopback.
 const HOST = '127.0.0.1';
-const PORT = Number(process.env.SANDBOX_PORT ?? 5174);
+const PORT = Number(process.env.SANDBOX_PORT ?? 5474);
 const seed = process.env.SANDBOX_SEED ?? 'sandbox';
 const fleetSize = process.env.SANDBOX_FLEET_SIZE ? Number(process.env.SANDBOX_FLEET_SIZE) : undefined;
 /** SQLite database for saved sessions, action logs and scores. */

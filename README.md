@@ -1,4 +1,4 @@
-# Splunk Engineer Sandbox
+# Splunk Engineer Sandbox v3
 
 A browser-based, fully simulated Splunk environment for practising engineer work and interview scenarios. It looks like a 35,000-forwarder enterprise, but nothing is real: no Splunk binaries, no real shell, no networking beyond localhost.
 
@@ -16,6 +16,14 @@ A browser-based, fully simulated Splunk environment for practising engineer work
 - interview mode with a timer, action log, rubric grader and debrief;
 - save, load and reset backed by SQLite.
 
+## V3: REA-based Splunk Web UI
+
+V3 opens on the Splunk Home page. The dark interface is reconstructed from the local Splunk Enterprise 9.2.2 captures. Use **Apps → Engineer Sandbox** for the original fleet, terminal, incidents, interviews and saved sessions.
+
+Home, global menus, Search & Reporting, Analytics, reports, alerts, dashboards, Studio examples, app management and all 34 captured Settings destinations are available. Searches and operational metrics use the existing simulation. Saved reports, dashboards and practice settings persist in this browser; simulation sessions continue to use SQLite.
+
+This is a broad UI reconstruction, **not complete 1:1 Splunk parity**. The full Studio editor, compiled app-only screens, and Splunk features beyond the simulator remain limited. See [the coverage and validation record](docs/V3-REA-UI.md) for exact supported behavior and gaps. No installed Splunk processes or configuration are changed.
+
 ## Requirements
 
 Node 20.19 or newer. Node 22 LTS is recommended (`.nvmrc`).
@@ -27,13 +35,13 @@ npm install
 npm run dev
 ```
 
-Then open <http://127.0.0.1:5173>. The API server listens on `127.0.0.1:5174`, and Vite proxies `/api` to it. Both bind to loopback only.
+Then open <http://127.0.0.1:5473>. The API server listens on `127.0.0.1:5474`, and Vite proxies `/api` to it. Both bind to loopback only.
 
 | Env var | Default | Meaning |
 |---|---|---|
 | `SANDBOX_SEED` | `sandbox` | World seed. The same seed always gives the same world. |
 | `SANDBOX_FLEET_SIZE` | `35000` | Number of simulated forwarders |
-| `SANDBOX_PORT` | `5174` | API port |
+| `SANDBOX_PORT` | `5474` | API port |
 | `SANDBOX_DB` | `data/sandbox.db` | SQLite file for saved sessions, action logs and scores (git-ignored) |
 | `ANTHROPIC_API_KEY` | unset | Turns on optional Claude grading of interview answers. Nothing else uses the network. |
 

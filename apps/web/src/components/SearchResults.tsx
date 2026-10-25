@@ -126,15 +126,19 @@ function FieldPopover({
 export function FieldsSidebar({
   job,
   onAdd,
+  showAll = false,
 }: {
   job: SearchJobDto;
   onAdd: (field: string, value: string) => void;
+  showAll?: boolean;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const sample = Math.min(job.eventCount, 2000);
   const byName = new Map(job.fields.map((f) => [f.name, f]));
   const selected = SELECTED.map((n) => byName.get(n)).filter((f): f is FieldSummaryDto => !!f);
-  const interesting = job.fields.filter((f) => !SELECTED.includes(f.name) && f.count >= sample * 0.2);
+  const interesting = job.fields.filter(
+    (f) => !SELECTED.includes(f.name) && (showAll || f.count >= sample * 0.2),
+  );
   const item = (f: FieldSummaryDto) => (
     <li key={f.name}>
       <button className="field-name" onClick={() => setOpen(open === f.name ? null : f.name)}>

@@ -31,7 +31,13 @@ export function Chart({
   clickRef.current = onClick;
 
   useEffect(() => {
-    const c = echarts.init(el.current!);
+    const c = echarts.init(el.current!, {
+      textStyle: { color: '#b7c1ca' },
+      legend: { textStyle: { color: '#b7c1ca' } },
+      categoryAxis: { axisLabel: { color: '#aeb8c2' }, axisLine: { lineStyle: { color: '#53616b' } } },
+      valueAxis: { axisLabel: { color: '#aeb8c2' }, splitLine: { lineStyle: { color: '#303a42' } } },
+      timeAxis: { axisLabel: { color: '#aeb8c2' } },
+    });
     chart.current = c;
     c.on('click', (p) => clickRef.current?.({ name: p.name, seriesId: p.seriesId ?? undefined }));
     const ro = new ResizeObserver(() => c.resize());
